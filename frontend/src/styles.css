@@ -1,0 +1,130 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #172554;
+  background: #f8fafc;
+  line-height: 1.5;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+nav {
+  min-height: 64px;
+  padding: 0 6vw;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+}
+a {
+  color: #2563eb;
+  text-decoration: none;
+}
+.brand {
+  color: #172554;
+  font-weight: 800;
+}
+.links {
+  display: flex;
+  gap: 1.25rem;
+  align-items: center;
+}
+.active {
+  font-weight: 700;
+}
+main {
+  width: min(1200px, 94vw);
+  margin: 3rem auto;
+}
+.card {
+  max-width: 520px;
+  margin: auto;
+  padding: 2rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  box-shadow: 0 12px 30px #0f172a12;
+}
+form,
+label {
+  display: grid;
+  gap: 0.5rem;
+}
+form {
+  gap: 1rem;
+}
+input {
+  padding: 0.8rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font: inherit;
+}
+button,
+.cta {
+  border: 0;
+  border-radius: 8px;
+  padding: 0.8rem 1.1rem;
+  color: #fff;
+  background: #2563eb;
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.55;
+}
+.link {
+  color: #2563eb;
+  background: transparent;
+  padding: 0;
+}
+.error {
+  color: #b91c1c;
+}
+.hero {
+  max-width: 700px;
+  padding: 4rem 0;
+}
+.hero h1 {
+  font-size: clamp(2.5rem, 7vw, 4.75rem);
+  line-height: 1.05;
+  margin: 0.4rem 0 1.5rem;
+}
+.eyebrow {
+  color: #2563eb;
+  font-weight: 700;
+}
+.cta {
+  display: inline-block;
+  margin-top: 1rem;
+}
+.profile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+dl {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+}
+dt {
+  font-weight: 700;
+}
+.status {
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  background: #fee2e2;
+  color: #991b1b;
+}
+.status.connected {
+  background: #dcfce7;
+  color: #166534;
+}
+.status.connecting {
+  background: #fef3c7;
+  color: #92400e;
+}

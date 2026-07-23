@@ -1,0 +1,22 @@
+{
+  "name": "@voice-chat/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "node -e \"console.log('Shared: no optional tests configured')\""
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  }
+}

@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+.angular/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Angular
+frontend/src/environments/environment.ts
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local caches
+.cache/
+.npm/
+
+# TypeScript
+*.tsbuildinfo

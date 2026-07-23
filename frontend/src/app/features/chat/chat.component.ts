@@ -1,0 +1,359 @@
+import { DatePipe, NgClass, NgFor, NgIf, UpperCasePipe } from '@angular/common';
+import {
+  AfterViewChecked,
+  Component,
+  DestroyRef,
+  ElementRef,
+  ViewChild,
+  inject,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
+import { finalize } from 'rxjs';
+import type {
+  ChatErrorPayload,
+  ChatMessagePayload,
+  ChatTypingPayload,
+  ConnectionState,
+  Conversation,
+  Message,
+} from '@voice-chat/shared';
+import { ChatService } from '../../core/services/chat.service';
+import { SocketService } from '../../core/services/socket.service';
+
+interface DisplayMessage extends Message {
+  deliveryState?: 'sending' | 'failed';
+}
+
+@Component({
+  selector: 'app-chat',
+  standalone: true,
+  imports: [DatePipe, NgClass, NgFor, NgIf, ReactiveFormsModule, UpperCasePipe],
+  templateUrl: './chat.component.html',
+  styleUrl: './chat.component.css',
+})
+export class ChatComponent implements AfterViewChecked {
+  @ViewChild('messageList') private messageList?: ElementRef<HTMLElement>;
+  readonly messageControl = new FormControl('', {
+    nonNullable: true,
+    validators: [Validators.required, Validators.maxLength(4000)],
+  });
+  readonly socket = inject(SocketService);
+  conversations: Conversation[] = [];
+  messages: DisplayMessage[] = [];
+  selectedConversationId: string | null = null;
+  connectionState: ConnectionState = 'disconnected';
+  loadingConversations = true;
+  loadingMessages = false;
+  creatingConversation = false;
+  pendingTurn = false;
+  geminiTyping = false;
+  errorMessage = '';
+  private activeClientMessageId: string | null = null;
+  private shouldScroll = false;
+  private readonly optimisticMessages = new Map<string, DisplayMessage>();
+  private readonly chat = inject(ChatService);
+  private readonly destroyRef = inject(DestroyRef);
+
+  constructor() {
+    this.socket.connectionState$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((state) => {
+      const previousState = this.connectionState;
+      this.connectionState = state;
+      if (this.pendingTurn && state !== 'connected') {
+        if (this.activeClientMessageId)
+          this.setOptimisticDeliveryState(this.activeClientMessageId, 'failed');
+        this.pendingTurn = false;
+        this.geminiTyping = false;
+        this.activeClientMessageId = null;
+        this.errorMessage =
+          'The connection was interrupted. Retry your message after reconnecting.';
+      }
+      if (state === 'connected' && previousState !== 'connected' && this.selectedConversationId)
+        this.loadMessages(this.selectedConversationId);
+    });
+    this.socket
+      .on<ChatMessagePayload>('chat:message')
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((payload) => this.receiveMessage(payload));
+    this.socket
+      .on<ChatTypingPayload>('chat:typing')
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((payload) => {
+        if (payload.conversationId === this.selectedConversationId)
+          this.geminiTyping = payload.typing;
+      });
+    this.socket
+      .on<ChatErrorPayload>('chat:error')
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((payload) => this.receiveError(payload));
+    this.loadConversations();
+  }
+
+  ngAfterViewChecked(): void {
+    if (!this.shouldScroll || !this.messageList) return;
+    this.messageList.nativeElement.scrollTop = this.messageList.nativeElement.scrollHeight;
+    this.shouldScroll = false;
+  }
+
+  selectConversation(conversation: Conversation): void {
+    if (this.selectedConversationId === conversation.id && !this.loadingMessages) return;
+    this.selectedConversationId = conversation.id;
+    this.messages = this.optimisticMessagesFor(conversation.id);
+    this.errorMessage = '';
+    this.geminiTyping = false;
+    this.loadMessages(conversation.id);
+  }
+
+  createConversation(): void {
+    if (this.creatingConversation) return;
+    this.creatingConversation = true;
+    this.errorMessage = '';
+    this.chat
+      .create('en')
+      .pipe(
+        finalize(() => (this.creatingConversation = false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (conversation) => {
+          this.conversations = [
+            conversation,
+            ...this.conversations.filter((item) => item.id !== conversation.id),
+          ];
+          this.selectConversation(conversation);
+        },
+        error: () => (this.errorMessage = 'Could not create a conversation. Please try again.'),
+      });
+  }
+
+  send(): void {
+    const conversationId = this.selectedConversationId;
+    const content = this.messageControl.value.trim();
+    if (!conversationId || !content || !this.canSend()) return;
+
+    const clientMessageId = this.newClientMessageId();
+    const optimisticMessage: DisplayMessage = {
+      id: `optimistic:${clientMessageId}`,
+      conversation_id: conversationId,
+      role: 'user',
+      content,
+      audio_url: null,
+      timestamp: new Date().toISOString(),
+      has_corrections: false,
+      client_message_id: clientMessageId,
+      reply_to_message_id: null,
+      deliveryState: 'sending',
+    };
+    this.optimisticMessages.set(clientMessageId, optimisticMessage);
+    this.messages = this.uniqueMessages([...this.messages, optimisticMessage]);
+    this.activeClientMessageId = clientMessageId;
+    this.pendingTurn = true;
+    this.errorMessage = '';
+    this.messageControl.reset('');
+    this.shouldScroll = true;
+
+    const sent = this.socket.emit('chat:send', { conversationId, content, clientMessageId });
+    if (!sent) {
+      this.setOptimisticDeliveryState(clientMessageId, 'failed');
+      this.pendingTurn = false;
+      this.geminiTyping = false;
+      this.activeClientMessageId = null;
+      this.errorMessage = 'The real-time connection is unavailable. Reconnect and try again.';
+    }
+  }
+
+  handleComposerKeydown(event: KeyboardEvent): void {
+    if (event.isComposing || event.key !== 'Enter' || event.shiftKey) return;
+
+    event.preventDefault();
+    this.send();
+  }
+
+  retry(message: DisplayMessage): void {
+    const clientMessageId = message.client_message_id;
+    if (message.deliveryState !== 'failed' || !clientMessageId) return;
+    if (this.connectionState !== 'connected') {
+      this.errorMessage = 'The real-time connection is unavailable. Reconnect and try again.';
+      return;
+    }
+    if (this.pendingTurn) {
+      this.errorMessage = 'Wait for the current response before retrying this message.';
+      return;
+    }
+
+    const sent = this.socket.emit('chat:send', {
+      conversationId: message.conversation_id,
+      content: message.content,
+      clientMessageId,
+    });
+    if (!sent) {
+      this.errorMessage = 'The real-time connection is unavailable. Reconnect and try again.';
+      return;
+    }
+
+    this.setOptimisticDeliveryState(clientMessageId, 'sending');
+    this.activeClientMessageId = clientMessageId;
+    this.pendingTurn = true;
+    this.geminiTyping = false;
+    this.errorMessage = '';
+    this.shouldScroll = true;
+  }
+
+  canSend(): boolean {
+    return (
+      this.connectionState === 'connected' &&
+      !this.pendingTurn &&
+      !!this.messageControl.value.trim() &&
+      this.messageControl.valid
+    );
+  }
+
+  trackConversation(_index: number, conversation: Conversation): string {
+    return conversation.id;
+  }
+
+  trackMessage(_index: number, message: DisplayMessage): string {
+    return message.id;
+  }
+
+  private loadConversations(): void {
+    this.chat
+      .list()
+      .pipe(
+        finalize(() => (this.loadingConversations = false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (conversations) => {
+          this.conversations = conversations;
+          if (conversations[0]) this.selectConversation(conversations[0]);
+          else this.createConversation();
+        },
+        error: () => (this.errorMessage = 'Could not load your conversations.'),
+      });
+  }
+
+  private loadMessages(conversationId: string): void {
+    this.loadingMessages = true;
+    this.chat
+      .loadMessages(conversationId)
+      .pipe(
+        finalize(() => (this.loadingMessages = false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (messages) => {
+          if (this.selectedConversationId !== conversationId) return;
+
+          const persistedClientMessageIds = new Set(
+            messages
+              .map((message) => message.client_message_id)
+              .filter((clientMessageId): clientMessageId is string => !!clientMessageId),
+          );
+          for (const clientMessageId of persistedClientMessageIds)
+            this.optimisticMessages.delete(clientMessageId);
+
+          const receivedPersistedMessages = this.messages.filter(
+            (message) => !message.deliveryState && message.conversation_id === conversationId,
+          );
+          this.messages = this.uniqueMessages([
+            ...receivedPersistedMessages,
+            ...messages,
+            ...this.optimisticMessagesFor(conversationId),
+          ]);
+          this.shouldScroll = true;
+        },
+        error: () => (this.errorMessage = 'Could not load this conversation.'),
+      });
+  }
+
+  private receiveMessage(payload: ChatMessagePayload): void {
+    const clientMessageId = payload.clientMessageId ?? payload.message.client_message_id;
+    if (payload.message.role === 'user' && clientMessageId) {
+      this.optimisticMessages.delete(clientMessageId);
+      this.messages = this.messages.filter(
+        (message) => !message.deliveryState || message.client_message_id !== clientMessageId,
+      );
+    }
+
+    if (payload.message.role === 'assistant' && clientMessageId === this.activeClientMessageId) {
+      this.pendingTurn = false;
+      this.geminiTyping = false;
+      this.activeClientMessageId = null;
+    }
+    if (payload.message.conversation_id !== this.selectedConversationId) return;
+
+    this.messages = this.uniqueMessages([...this.messages, payload.message]);
+    this.shouldScroll = true;
+  }
+
+  private receiveError(payload: ChatErrorPayload): void {
+    const clientMessageId = payload.clientMessageId;
+    const optimisticMessage = clientMessageId
+      ? this.optimisticMessages.get(clientMessageId)
+      : undefined;
+    const matchesActiveTurn = !!clientMessageId && clientMessageId === this.activeClientMessageId;
+
+    if (clientMessageId && optimisticMessage)
+      this.setOptimisticDeliveryState(clientMessageId, 'failed');
+    if (matchesActiveTurn) {
+      this.pendingTurn = false;
+      this.activeClientMessageId = null;
+    }
+    if (payload.conversationId && payload.conversationId !== this.selectedConversationId) return;
+    if (clientMessageId && !matchesActiveTurn && !optimisticMessage) return;
+
+    this.errorMessage = payload.message || 'The message could not be sent.';
+    this.pendingTurn = false;
+    this.geminiTyping = false;
+  }
+
+  private setOptimisticDeliveryState(
+    clientMessageId: string,
+    deliveryState: NonNullable<DisplayMessage['deliveryState']>,
+  ): void {
+    const optimisticMessage = this.optimisticMessages.get(clientMessageId);
+    if (!optimisticMessage) return;
+
+    const updatedMessage: DisplayMessage = { ...optimisticMessage, deliveryState };
+    this.optimisticMessages.set(clientMessageId, updatedMessage);
+    this.messages = this.messages.map((message) =>
+      message.client_message_id === clientMessageId && message.deliveryState
+        ? updatedMessage
+        : message,
+    );
+  }
+
+  private optimisticMessagesFor(conversationId: string): DisplayMessage[] {
+    return Array.from(this.optimisticMessages.values()).filter(
+      (message) => message.conversation_id === conversationId,
+    );
+  }
+
+  private uniqueMessages(messages: DisplayMessage[]): DisplayMessage[] {
+    const uniqueMessages = new Map<string, DisplayMessage>();
+    for (const message of messages) {
+      const key =
+        message.role === 'user' && message.client_message_id
+          ? `client:${message.client_message_id}`
+          : `id:${message.id}`;
+      const existing = uniqueMessages.get(key);
+      if (!existing || existing.deliveryState || !message.deliveryState)
+        uniqueMessages.set(key, message);
+    }
+
+    return Array.from(uniqueMessages.values()).sort(
+      (left, right) =>
+        left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id),
+    );
+  }
+
+  private newClientMessageId(): string {
+    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+    bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+}

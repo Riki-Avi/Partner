@@ -1,0 +1,36 @@
+{
+  "name": "voice-chat-foundation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Foundation for a voice-based English learning chat application.",
+  "workspaces": [
+    "frontend",
+    "backend",
+    "shared"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n frontend,backend -c blue,green \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "npm run start --workspace=frontend",
+    "dev:backend": "npm run dev --workspace=backend",
+    "build": "npm run build --workspace=shared && npm run build --workspace=backend && npm run build --workspace=frontend",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "lint:frontend": "npm run lint --workspace=frontend",
+    "lint:backend": "npm run lint --workspace=backend",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "seed": "npm run seed --workspace=backend"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.17.0",
+    "concurrently": "9.1.2",
+    "eslint": "9.17.0",
+    "eslint-config-prettier": "9.1.0",
+    "globals": "15.14.0",
+    "prettier": "3.4.2",
+    "typescript-eslint": "8.19.1"
+  }
+}

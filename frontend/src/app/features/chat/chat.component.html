@@ -1,0 +1,94 @@
+<section class="chat-shell">
+  <aside class="conversation-sidebar" aria-label="Conversations">
+    <div class="sidebar-heading">
+      <div>
+        <p class="eyebrow">English tutor</p>
+        <h1>Conversations</h1>
+      </div>
+      <button type="button" (click)="createConversation()" [disabled]="creatingConversation">
+        {{ creatingConversation ? 'Creating…' : 'New' }}
+      </button>
+    </div>
+    <p *ngIf="loadingConversations" class="muted">Loading conversations…</p>
+    <div class="conversation-list" *ngIf="!loadingConversations">
+      <button
+        type="button"
+        class="conversation-item"
+        *ngFor="let conversation of conversations; trackBy: trackConversation"
+        [class.selected]="conversation.id === selectedConversationId"
+        (click)="selectConversation(conversation)"
+      >
+        <strong>{{ conversation.language | uppercase }} practice</strong>
+        <span>{{ conversation.started_at | date: 'medium' }}</span>
+      </button>
+    </div>
+  </aside>
+
+  <div class="chat-panel">
+    <header class="chat-header">
+      <div>
+        <h2>Chat with Gemini</h2>
+        <p>Practice naturally and receive gentle English corrections.</p>
+      </div>
+      <span class="status" [ngClass]="connectionState">{{ connectionState }}</span>
+    </header>
+
+    <div #messageList class="message-list" aria-live="polite">
+      <p *ngIf="loadingMessages" class="empty-state">Loading messages…</p>
+      <div *ngIf="!loadingMessages && messages.length === 0" class="empty-state">
+        <strong>Start your English conversation</strong>
+        <span>Try introducing yourself or asking Gemini a question.</span>
+      </div>
+      <article
+        class="message"
+        *ngFor="let message of messages; trackBy: trackMessage"
+        [class.user-message]="message.role === 'user'"
+        [class.assistant-message]="message.role === 'assistant'"
+        [class.failed-message]="message.deliveryState === 'failed'"
+      >
+        <span class="message-role">{{ message.role === 'user' ? 'You' : 'Gemini' }}</span>
+        <p>{{ message.content }}</p>
+        <div class="message-meta">
+          <time>{{ message.timestamp | date: 'shortTime' }}</time>
+          <span *ngIf="message.deliveryState === 'sending'" class="delivery-state"> Sending… </span>
+          <span *ngIf="message.deliveryState === 'failed'" class="delivery-state"> Not sent </span>
+          <button
+            *ngIf="message.deliveryState === 'failed'"
+            type="button"
+            class="retry-button"
+            [disabled]="pendingTurn"
+            [attr.aria-label]="'Retry sending: ' + message.content"
+            (click)="retry(message)"
+          >
+            Retry
+          </button>
+        </div>
+      </article>
+      <div class="typing" *ngIf="geminiTyping">
+        <span></span><span></span><span></span> Gemini is typing
+      </div>
+    </div>
+
+    <div class="chat-error" *ngIf="errorMessage" role="alert">{{ errorMessage }}</div>
+    <form class="composer" (ngSubmit)="send()">
+      <textarea
+        [formControl]="messageControl"
+        rows="3"
+        maxlength="4000"
+        placeholder="Write a message in English…"
+        aria-label="Message. Enter sends; Shift+Enter adds a new line."
+        title="Enter sends. Shift+Enter adds a new line."
+        (keydown)="handleComposerKeydown($event)"
+      ></textarea>
+      <div class="composer-actions">
+        <small>Enter to send · Shift+Enter for a new line</small>
+        <div class="send-actions">
+          <small>{{ messageControl.value.length }}/4000</small>
+          <button type="button" [disabled]="!canSend()" (click)="send()">
+            {{ pendingTurn ? 'Waiting for Gemini…' : 'Send' }}
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+</section>
