@@ -34,4 +34,9 @@ export interface ApiResponse<T> {
 
 export interface CreateConversationRequest {
   language?: string;
+  title?: string;
+}
+
+export interface RenameConversationRequest {
+  title: string;
 }

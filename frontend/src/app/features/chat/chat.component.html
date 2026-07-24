@@ -5,39 +5,109 @@
         <p class="eyebrow">English tutor</p>
         <h1>Conversations</h1>
       </div>
-      <button type="button" (click)="createConversation()" [disabled]="creatingConversation">
+      <button
+        type="button"
+        (click)="createConversation()"
+        [disabled]="creatingConversation"
+        aria-label="Create a new conversation"
+      >
         {{ creatingConversation ? 'Creating…' : 'New' }}
       </button>
     </div>
     <p *ngIf="loadingConversations" class="muted">Loading conversations…</p>
-    <div class="conversation-list" *ngIf="!loadingConversations">
-      <button
-        type="button"
-        class="conversation-item"
+    <div class="conversation-list" *ngIf="!loadingConversations" role="list">
+      <article
+        class="conversation-card"
         *ngFor="let conversation of conversations; trackBy: trackConversation"
         [class.selected]="conversation.id === selectedConversationId"
-        (click)="selectConversation(conversation)"
+        role="listitem"
       >
-        <strong>{{ conversation.language | uppercase }} practice</strong>
-        <span>{{ conversation.started_at | date: 'medium' }}</span>
-      </button>
+        <button
+          type="button"
+          class="conversation-select"
+          (click)="selectConversation(conversation)"
+          [attr.aria-current]="conversation.id === selectedConversationId ? 'true' : null"
+          [attr.aria-label]="
+            'Open ' + conversation.title + ', ' + (conversation.ended_at ? 'ended' : 'active')
+          "
+        >
+          <strong>{{ conversation.title }}</strong>
+          <span class="conversation-details">
+            <span class="conversation-state" [class.ended]="conversation.ended_at">
+              {{ conversation.ended_at ? 'Ended' : 'Active' }}
+            </span>
+            <span>{{ conversation.language | uppercase }}</span>
+          </span>
+          <time [attr.datetime]="conversation.started_at">
+            {{ conversation.started_at | date: 'mediumDate' }}
+          </time>
+        </button>
+        <div class="conversation-actions" [attr.aria-label]="'Actions for ' + conversation.title">
+          <button
+            type="button"
+            (click)="renameConversation(conversation)"
+            [disabled]="conversationActionId !== null || pendingTurn"
+            [attr.aria-label]="'Rename ' + conversation.title"
+          >
+            Rename
+          </button>
+          <button
+            *ngIf="!conversation.ended_at"
+            type="button"
+            (click)="endConversation(conversation)"
+            [disabled]="conversationActionId !== null || pendingTurn"
+            [attr.aria-label]="'End ' + conversation.title"
+          >
+            End
+          </button>
+          <button
+            type="button"
+            class="danger-action"
+            (click)="deleteConversation(conversation)"
+            [disabled]="conversationActionId !== null || pendingTurn"
+            [attr.aria-label]="'Delete ' + conversation.title"
+          >
+            Delete
+          </button>
+        </div>
+      </article>
     </div>
   </aside>
 
   <div class="chat-panel">
     <header class="chat-header">
       <div>
-        <h2>Chat with Gemini</h2>
-        <p>Practice naturally and receive gentle English corrections.</p>
+        <h2>{{ selectedConversation?.title || 'Chat with Gemini' }}</h2>
+        <p>
+          {{
+            selectedConversationEnded
+              ? 'This conversation has ended. Its history remains available.'
+              : 'Practice naturally and receive gentle English corrections.'
+          }}
+        </p>
       </div>
-      <span class="status" [ngClass]="connectionState">{{ connectionState }}</span>
+      <div class="header-controls">
+        <label class="auto-read-toggle">
+          <input
+            type="checkbox"
+            [checked]="readRepliesAloud"
+            [disabled]="!synthesisSupported"
+            (change)="updateReadRepliesAloud($event)"
+          />
+          Read replies aloud
+        </label>
+        <span class="status" [ngClass]="connectionState">{{ connectionState }}</span>
+      </div>
     </header>
 
     <div #messageList class="message-list" aria-live="polite">
       <p *ngIf="loadingMessages" class="empty-state">Loading messages…</p>
       <div *ngIf="!loadingMessages && messages.length === 0" class="empty-state">
         <strong>Start your English conversation</strong>
-        <span>Try introducing yourself or asking Gemini a question.</span>
+        <span *ngIf="!selectedConversationEnded">
+          Try introducing yourself or asking Gemini a question.
+        </span>
+        <span *ngIf="selectedConversationEnded">This conversation ended without messages.</span>
       </div>
       <article
         class="message"
@@ -49,18 +119,32 @@
         <span class="message-role">{{ message.role === 'user' ? 'You' : 'Gemini' }}</span>
         <p>{{ message.content }}</p>
         <div class="message-meta">
-          <time>{{ message.timestamp | date: 'shortTime' }}</time>
+          <time [attr.datetime]="message.timestamp">{{
+            message.timestamp | date: 'shortTime'
+          }}</time>
           <span *ngIf="message.deliveryState === 'sending'" class="delivery-state"> Sending… </span>
           <span *ngIf="message.deliveryState === 'failed'" class="delivery-state"> Not sent </span>
           <button
             *ngIf="message.deliveryState === 'failed'"
             type="button"
             class="retry-button"
-            [disabled]="pendingTurn"
+            [disabled]="pendingTurn || selectedConversationEnded"
             [attr.aria-label]="'Retry sending: ' + message.content"
             (click)="retry(message)"
           >
             Retry
+          </button>
+          <button
+            *ngIf="message.role === 'assistant'"
+            type="button"
+            class="listen-button"
+            [disabled]="!synthesisSupported"
+            [attr.aria-label]="
+              isReadingMessage(message) ? 'Stop reading this reply' : 'Listen to this reply aloud'
+            "
+            (click)="toggleMessageSpeech(message)"
+          >
+            {{ isReadingMessage(message) ? 'Stop' : 'Listen' }}
           </button>
         </div>
       </article>
@@ -70,6 +154,15 @@
     </div>
 
     <div class="chat-error" *ngIf="errorMessage" role="alert">{{ errorMessage }}</div>
+    <div class="voice-status" aria-live="polite">
+      <p *ngIf="isListening">Listening… Speak clearly, then choose Stop mic.</p>
+      <p *ngIf="isSpeaking">Reading a reply aloud…</p>
+      <p *ngIf="voiceError" class="voice-error" role="alert">{{ voiceError }}</p>
+      <p *ngIf="selectedConversationEnded" class="ended-hint">
+        This conversation is read-only. Start a new conversation to continue practicing.
+      </p>
+    </div>
+
     <form class="composer" (ngSubmit)="send()">
       <textarea
         [formControl]="messageControl"
@@ -77,14 +170,39 @@
         maxlength="4000"
         placeholder="Write a message in English…"
         aria-label="Message. Enter sends; Shift+Enter adds a new line."
+        aria-describedby="speech-support-hint"
         title="Enter sends. Shift+Enter adds a new line."
         (keydown)="handleComposerKeydown($event)"
       ></textarea>
       <div class="composer-actions">
-        <small>Enter to send · Shift+Enter for a new line</small>
+        <div class="composer-help">
+          <small>Enter to send · Shift+Enter for a new line</small>
+          <small id="speech-support-hint" *ngIf="recognitionSupported">
+            Your browser's speech provider may process audio; Partner does not upload it. Review the
+            transcript before sending.
+          </small>
+          <small id="speech-support-hint" *ngIf="!recognitionSupported">
+            Mic dictation is not supported in this browser. Chrome or Edge is recommended.
+          </small>
+          <small *ngIf="!synthesisSupported">
+            Listen playback is not supported in this browser.
+          </small>
+        </div>
         <div class="send-actions">
           <small>{{ messageControl.value.length }}/4000</small>
-          <button type="button" [disabled]="!canSend()" (click)="send()">
+          <button
+            type="button"
+            class="mic-button"
+            [disabled]="!listeningSessionActive && !canStartListening()"
+            [attr.aria-pressed]="listeningSessionActive"
+            [attr.aria-label]="
+              listeningSessionActive ? 'Stop microphone dictation' : 'Start microphone dictation'
+            "
+            (click)="toggleListening()"
+          >
+            {{ listeningSessionActive ? 'Stop mic' : 'Mic' }}
+          </button>
+          <button type="submit" [disabled]="!canSend()">
             {{ pendingTurn ? 'Waiting for Gemini…' : 'Send' }}
           </button>
         </div>

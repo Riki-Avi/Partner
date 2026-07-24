@@ -10,7 +10,11 @@ import type {
 } from '@voice-chat/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabase } from '../config/supabase.config.js';
-import { DatabaseError, NotFoundError } from '../middleware/error.middleware.js';
+import {
+  ConversationEndedError,
+  DatabaseError,
+  NotFoundError,
+} from '../middleware/error.middleware.js';
 
 type UserChanges = Partial<Pick<User, 'name' | 'level'>>;
 type ConversationChanges = Partial<
@@ -108,14 +112,19 @@ export class DatabaseService {
    * Starts a conversation for a user.
    * @param userId Owner of the conversation.
    * @param language Conversation language code; defaults to English.
+   * @param title Human-readable conversation title.
    * @returns The newly persisted conversation.
    * @throws {DatabaseError} If insertion fails.
    * @throws {NotFoundError} If the database does not return the inserted row.
    */
-  async createConversation(userId: string, language = 'en'): Promise<Conversation> {
+  async createConversation(
+    userId: string,
+    language = 'en',
+    title = 'English practice',
+  ): Promise<Conversation> {
     const r = await this.client
       .from('conversations')
-      .insert({ user_id: userId, language })
+      .insert({ user_id: userId, language, title })
       .select()
       .single();
     return this.unwrap(r.data as Conversation | null, r.error, 'Conversation');
@@ -166,26 +175,12 @@ export class DatabaseService {
     return data as Conversation[];
   }
 
-  /**
-   * Applies editable fields to a conversation.
-   * @param id Conversation identifier to update.
-   * @param changes End time, language, or duration fields to persist.
-   * @returns The updated conversation.
-   * @throws {DatabaseError} If the update fails.
-   * @throws {NotFoundError} If the conversation does not exist.
-   */
+  /** Applies editable fields to a conversation by identifier. */
   async updateConversation(id: string, changes: ConversationChanges): Promise<Conversation> {
     return this.updateById('conversations', id, changes, 'Conversation');
   }
 
-  /**
-   * Marks a conversation as ended at the current time.
-   * @param id Conversation identifier to end.
-   * @param durationSeconds Total elapsed conversation duration in seconds.
-   * @returns The ended conversation.
-   * @throws {DatabaseError} If the update fails.
-   * @throws {NotFoundError} If the conversation does not exist.
-   */
+  /** Marks a conversation as ended with a caller-supplied duration. */
   async endConversation(id: string, durationSeconds: number): Promise<Conversation> {
     return this.updateConversation(id, {
       ended_at: new Date().toISOString(),
@@ -193,15 +188,65 @@ export class DatabaseService {
     });
   }
 
-  /**
-   * Deletes a conversation by identifier.
-   * @param id Conversation identifier to delete.
-   * @returns A promise that resolves when deletion completes.
-   * @throws {DatabaseError} If deletion fails.
-   * @throws {NotFoundError} If the conversation does not exist.
-   */
+  /** Deletes a conversation by identifier. */
   async deleteConversation(id: string): Promise<void> {
     await this.deleteById('conversations', id, 'Conversation');
+  }
+
+  /** Renames a conversation only when it belongs to the supplied user. */
+  async renameOwnedConversation(id: string, userId: string, title: string): Promise<Conversation> {
+    const { data, error } = await this.client
+      .from('conversations')
+      .update({ title })
+      .eq('id', id)
+      .eq('user_id', userId)
+      .select()
+      .maybeSingle();
+    if (error) throw new DatabaseError(`Conversation: ${error.message}`);
+    if (!data) throw new NotFoundError('Conversation not found');
+    return data as Conversation;
+  }
+
+  /**
+   * Ends an owned conversation using application time clamped to its persisted start time.
+   * Repeated calls return the original end state.
+   */
+  async endOwnedConversation(id: string, userId: string): Promise<Conversation> {
+    const conversation = await this.requireOwnedConversation(id, userId);
+    if (conversation.ended_at) return conversation;
+
+    const startedAtMs = new Date(conversation.started_at).getTime();
+    if (!Number.isFinite(startedAtMs))
+      throw new DatabaseError('Conversation has an invalid start time');
+    const endedAtMs = Math.max(Date.now(), startedAtMs);
+    const endedAt = new Date(endedAtMs);
+    const durationSeconds = Math.floor((endedAtMs - startedAtMs) / 1000);
+    const { data, error } = await this.client
+      .from('conversations')
+      .update({ ended_at: endedAt.toISOString(), duration_seconds: durationSeconds })
+      .eq('id', id)
+      .eq('user_id', userId)
+      .is('ended_at', null)
+      .select()
+      .maybeSingle();
+    if (error) throw new DatabaseError(`Conversation: ${error.message}`);
+    if (data) return data as Conversation;
+
+    const concurrentlyEnded = await this.getOwnedConversation(id, userId);
+    if (!concurrentlyEnded) throw new NotFoundError('Conversation not found');
+    if (!concurrentlyEnded.ended_at) throw new DatabaseError('Conversation could not be ended');
+    return concurrentlyEnded;
+  }
+
+  /** Deletes a conversation only when it belongs to the supplied user. */
+  async deleteOwnedConversation(id: string, userId: string): Promise<void> {
+    const { error, count } = await this.client
+      .from('conversations')
+      .delete({ count: 'exact' })
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (error) throw new DatabaseError(`Conversation: ${error.message}`);
+    if (count === 0) throw new NotFoundError('Conversation not found');
   }
 
   /**
@@ -292,6 +337,8 @@ export class DatabaseService {
       .select()
       .single();
     if (!error && data) return data as Message;
+    if (error?.code === 'P0001' && error.message.toUpperCase().includes('CONVERSATION_ENDED'))
+      throw new ConversationEndedError();
     if (error?.code === '23505') {
       const existing = await this.getOwnedUserMessage(conversationId, userId, clientMessageId);
       if (existing) return existing;

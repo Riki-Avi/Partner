@@ -29,6 +29,11 @@ export class ConflictError extends AppError {
     super(message, 409, 'CONFLICT');
   }
 }
+export class ConversationEndedError extends AppError {
+  constructor(message = 'This conversation has ended and can no longer receive messages') {
+    super(message, 409, 'CONVERSATION_ENDED');
+  }
+}
 export class DatabaseError extends AppError {
   constructor(message = 'Database operation failed') {
     super(message, 500, 'DATABASE_ERROR');

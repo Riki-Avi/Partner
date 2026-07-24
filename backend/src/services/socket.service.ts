@@ -7,6 +7,7 @@ import type {
   ServerEvents,
 } from '@voice-chat/shared';
 import { supabase } from '../config/supabase.config.js';
+import { ConversationEndedError } from '../middleware/error.middleware.js';
 import { databaseService } from './database.service.js';
 import { geminiService } from './gemini.service.js';
 
@@ -99,6 +100,14 @@ export class SocketService {
         });
         return;
       }
+      if (conversation.ended_at) {
+        this.emitChatError(socket, {
+          ...correlation,
+          code: 'CONVERSATION_ENDED',
+          message: 'This conversation has ended and can no longer receive messages',
+        });
+        return;
+      }
     } catch {
       this.emitChatError(socket, {
         ...correlation,
@@ -108,7 +117,18 @@ export class SocketService {
       return;
     }
 
+    if (this.busyConversations.has(conversationId)) {
+      this.emitChatError(socket, {
+        ...correlation,
+        code: 'TURN_IN_PROGRESS',
+        message: 'Please wait for the current reply to finish',
+      });
+      return;
+    }
+
+    this.busyConversations.add(conversationId);
     const room = `user:${userId}`;
+    let typing = false;
     try {
       const userMessage = await databaseService.saveOwnedUserMessage(
         conversationId,
@@ -128,48 +148,35 @@ export class SocketService {
         return;
       }
 
-      if (this.busyConversations.has(conversationId)) {
+      typing = true;
+      this.io?.to(room).emit('chat:typing', { conversationId, typing: true });
+      const history = await databaseService.getOwnedConversationMessages(conversationId, userId);
+      const reply = await geminiService.generateReply(history);
+      const assistantMessage = await databaseService.saveOwnedAssistantReply(
+        conversationId,
+        userId,
+        userMessage.id,
+        reply,
+      );
+      this.io?.to(room).emit('chat:message', { message: assistantMessage, clientMessageId });
+    } catch (error) {
+      if (error instanceof ConversationEndedError) {
         this.emitChatError(socket, {
           ...correlation,
-          code: 'TURN_IN_PROGRESS',
-          message: 'Please wait for the current reply to finish',
+          code: 'CONVERSATION_ENDED',
+          message: error.message,
         });
-        return;
+      } else {
+        console.error(`Chat turn failed for conversation ${conversationId}:`, error);
+        this.emitChatError(socket, {
+          ...correlation,
+          code: 'CHAT_GENERATION_FAILED',
+          message: 'Unable to complete this reply. Please try again.',
+        });
       }
-
-      this.busyConversations.add(conversationId);
-      this.io?.to(room).emit('chat:typing', { conversationId, typing: true });
-      try {
-        const replyAfterLock = await databaseService.getOwnedAssistantReply(
-          conversationId,
-          userId,
-          userMessage.id,
-        );
-        if (replyAfterLock) {
-          this.io?.to(room).emit('chat:message', { message: replyAfterLock, clientMessageId });
-          return;
-        }
-
-        const history = await databaseService.getOwnedConversationMessages(conversationId, userId);
-        const reply = await geminiService.generateReply(history);
-        const assistantMessage = await databaseService.saveOwnedAssistantReply(
-          conversationId,
-          userId,
-          userMessage.id,
-          reply,
-        );
-        this.io?.to(room).emit('chat:message', { message: assistantMessage, clientMessageId });
-      } finally {
-        this.busyConversations.delete(conversationId);
-        this.io?.to(room).emit('chat:typing', { conversationId, typing: false });
-      }
-    } catch (error) {
-      console.error(`Chat turn failed for conversation ${conversationId}:`, error);
-      this.emitChatError(socket, {
-        ...correlation,
-        code: 'CHAT_GENERATION_FAILED',
-        message: 'Unable to complete this reply. Please try again.',
-      });
+    } finally {
+      this.busyConversations.delete(conversationId);
+      if (typing) this.io?.to(room).emit('chat:typing', { conversationId, typing: false });
     }
   }
 

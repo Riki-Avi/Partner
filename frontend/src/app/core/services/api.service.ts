@@ -31,6 +31,11 @@ export class ApiService {
     return this.http.post<T>(this.url(path), body);
   }
 
+  /** Sends an HTTP PATCH request to an API path. */
+  patch<T, B = unknown>(path: string, body: B): Observable<T> {
+    return this.http.patch<T>(this.url(path), body);
+  }
+
   /**
    * Sends an HTTP PUT request to an API path.
    * @param path Path relative to the configured API base URL.

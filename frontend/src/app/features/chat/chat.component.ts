@@ -4,12 +4,13 @@ import {
   Component,
   DestroyRef,
   ElementRef,
+  OnDestroy,
   ViewChild,
   inject,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
-import { finalize } from 'rxjs';
+import { finalize, type Subscription } from 'rxjs';
 import type {
   ChatErrorPayload,
   ChatMessagePayload,
@@ -20,10 +21,15 @@ import type {
 } from '@voice-chat/shared';
 import { ChatService } from '../../core/services/chat.service';
 import { SocketService } from '../../core/services/socket.service';
+import { SpeechService } from '../../core/services/speech.service';
 
 interface DisplayMessage extends Message {
   deliveryState?: 'sending' | 'failed';
 }
+
+const DEFAULT_CONVERSATION_TITLE = 'English practice';
+const MAX_TITLE_LENGTH = 120;
+const AUTO_READ_STORAGE_KEY = 'voice_chat_read_replies_aloud';
 
 @Component({
   selector: 'app-chat',
@@ -32,13 +38,15 @@ interface DisplayMessage extends Message {
   templateUrl: './chat.component.html',
   styleUrl: './chat.component.css',
 })
-export class ChatComponent implements AfterViewChecked {
+export class ChatComponent implements AfterViewChecked, OnDestroy {
   @ViewChild('messageList') private messageList?: ElementRef<HTMLElement>;
+
   readonly messageControl = new FormControl('', {
     nonNullable: true,
     validators: [Validators.required, Validators.maxLength(4000)],
   });
   readonly socket = inject(SocketService);
+
   conversations: Conversation[] = [];
   messages: DisplayMessage[] = [];
   selectedConversationId: string | null = null;
@@ -49,19 +57,35 @@ export class ChatComponent implements AfterViewChecked {
   pendingTurn = false;
   geminiTyping = false;
   errorMessage = '';
+  voiceError = '';
+  isListening = false;
+  listeningSessionActive = false;
+  isSpeaking = false;
+  speakingMessageId: string | null = null;
+  conversationActionId: string | null = null;
+  readRepliesAloud = this.loadAutoReadPreference();
+
   private activeClientMessageId: string | null = null;
+  private listeningSubscription: Subscription | null = null;
+  private messageLoadRequestId = 0;
   private shouldScroll = false;
   private readonly optimisticMessages = new Map<string, DisplayMessage>();
+  private readonly spokenMessageIds = new Set<string>();
   private readonly chat = inject(ChatService);
+  private readonly speech = inject(SpeechService);
   private readonly destroyRef = inject(DestroyRef);
+
+  readonly recognitionSupported = this.speech.recognitionSupported;
+  readonly synthesisSupported = this.speech.synthesisSupported;
 
   constructor() {
     this.socket.connectionState$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((state) => {
       const previousState = this.connectionState;
       this.connectionState = state;
+      if (state !== 'connected' && this.listeningSessionActive) this.cancelListening();
       if (this.pendingTurn && state !== 'connected') {
         if (this.activeClientMessageId)
-          this.setOptimisticDeliveryState(this.activeClientMessageId, 'failed');
+          this.setMessageDeliveryState(this.activeClientMessageId, 'failed');
         this.pendingTurn = false;
         this.geminiTyping = false;
         this.activeClientMessageId = null;
@@ -86,7 +110,27 @@ export class ChatComponent implements AfterViewChecked {
       .on<ChatErrorPayload>('chat:error')
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((payload) => this.receiveError(payload));
+    this.speech.listening$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((listening) => (this.isListening = listening));
+    this.speech.speaking$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((speaking) => {
+      this.isSpeaking = speaking;
+      if (!speaking) this.speakingMessageId = null;
+    });
+    this.speech.error$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((message) => (this.voiceError = message ?? ''));
     this.loadConversations();
+  }
+
+  get selectedConversation(): Conversation | undefined {
+    return this.conversations.find(
+      (conversation) => conversation.id === this.selectedConversationId,
+    );
+  }
+
+  get selectedConversationEnded(): boolean {
+    return !!this.selectedConversation?.ended_at;
   }
 
   ngAfterViewChecked(): void {
@@ -95,12 +139,23 @@ export class ChatComponent implements AfterViewChecked {
     this.shouldScroll = false;
   }
 
+  ngOnDestroy(): void {
+    this.stopVoice();
+  }
+
   selectConversation(conversation: Conversation): void {
-    if (this.selectedConversationId === conversation.id && !this.loadingMessages) return;
+    if (this.selectedConversationId === conversation.id) {
+      if (!this.loadingMessages) this.loadMessages(conversation.id);
+      return;
+    }
+    this.stopVoice();
+    this.messageControl.reset('');
     this.selectedConversationId = conversation.id;
     this.messages = this.optimisticMessagesFor(conversation.id);
     this.errorMessage = '';
+    this.voiceError = '';
     this.geminiTyping = false;
+    this.updateComposerAvailability();
     this.loadMessages(conversation.id);
   }
 
@@ -109,7 +164,7 @@ export class ChatComponent implements AfterViewChecked {
     this.creatingConversation = true;
     this.errorMessage = '';
     this.chat
-      .create('en')
+      .create('en', DEFAULT_CONVERSATION_TITLE)
       .pipe(
         finalize(() => (this.creatingConversation = false)),
         takeUntilDestroyed(this.destroyRef),
@@ -123,6 +178,113 @@ export class ChatComponent implements AfterViewChecked {
           this.selectConversation(conversation);
         },
         error: () => (this.errorMessage = 'Could not create a conversation. Please try again.'),
+      });
+  }
+
+  renameConversation(conversation: Conversation): void {
+    if (this.conversationActionId || this.pendingTurn || typeof window === 'undefined') return;
+    const requestedTitle = window.prompt('Conversation title', conversation.title);
+    if (requestedTitle === null) return;
+    const title = requestedTitle.trim();
+    if (!title || title.length > MAX_TITLE_LENGTH) {
+      this.errorMessage = `Conversation titles must contain 1-${MAX_TITLE_LENGTH} characters.`;
+      return;
+    }
+    if (title === conversation.title) return;
+
+    this.conversationActionId = conversation.id;
+    this.errorMessage = '';
+    this.chat
+      .rename(conversation.id, title)
+      .pipe(
+        finalize(() => {
+          if (this.conversationActionId === conversation.id) this.conversationActionId = null;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (updated) => {
+          this.conversations = this.conversations.map((item) =>
+            item.id === updated.id ? updated : item,
+          );
+        },
+        error: () => (this.errorMessage = 'Could not rename this conversation. Please try again.'),
+      });
+  }
+
+  endConversation(conversation: Conversation): void {
+    if (
+      conversation.ended_at ||
+      this.conversationActionId ||
+      this.pendingTurn ||
+      typeof window === 'undefined'
+    )
+      return;
+    if (!window.confirm(`End “${conversation.title}”? You will not be able to send more messages.`))
+      return;
+
+    if (conversation.id === this.selectedConversationId) this.stopVoice();
+    this.conversationActionId = conversation.id;
+    this.errorMessage = '';
+    this.chat
+      .end(conversation.id)
+      .pipe(
+        finalize(() => {
+          if (this.conversationActionId === conversation.id) this.conversationActionId = null;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (updated) => {
+          this.conversations = this.conversations.map((item) =>
+            item.id === updated.id ? updated : item,
+          );
+          if (updated.id === this.selectedConversationId) this.updateComposerAvailability();
+        },
+        error: () => (this.errorMessage = 'Could not end this conversation. Please try again.'),
+      });
+  }
+
+  deleteConversation(conversation: Conversation): void {
+    if (this.conversationActionId || this.pendingTurn || typeof window === 'undefined') return;
+    if (!window.confirm(`Delete “${conversation.title}” and all of its messages?`)) return;
+
+    if (this.selectedConversationId === conversation.id) this.stopVoice();
+    const deletedIndex = this.conversations.findIndex((item) => item.id === conversation.id);
+    this.conversationActionId = conversation.id;
+    this.errorMessage = '';
+    this.chat
+      .delete(conversation.id)
+      .pipe(
+        finalize(() => {
+          if (this.conversationActionId === conversation.id) this.conversationActionId = null;
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: () => {
+          const remaining = this.conversations.filter((item) => item.id !== conversation.id);
+          this.conversations = remaining;
+          for (const [clientMessageId, message] of this.optimisticMessages) {
+            if (message.conversation_id === conversation.id)
+              this.optimisticMessages.delete(clientMessageId);
+          }
+          if (this.selectedConversationId !== conversation.id) return;
+
+          this.selectedConversationId = null;
+          this.messageLoadRequestId += 1;
+          this.loadingMessages = false;
+          this.messages = [];
+          this.messageControl.reset('');
+          this.pendingTurn = false;
+          this.geminiTyping = false;
+          this.activeClientMessageId = null;
+          this.updateComposerAvailability();
+          const neighbor = remaining[Math.min(Math.max(deletedIndex, 0), remaining.length - 1)];
+          if (neighbor) this.selectConversation(neighbor);
+          else this.createConversation();
+        },
+        error: () => (this.errorMessage = 'Could not delete this conversation. Please try again.'),
       });
   }
 
@@ -154,7 +316,7 @@ export class ChatComponent implements AfterViewChecked {
 
     const sent = this.socket.emit('chat:send', { conversationId, content, clientMessageId });
     if (!sent) {
-      this.setOptimisticDeliveryState(clientMessageId, 'failed');
+      this.setMessageDeliveryState(clientMessageId, 'failed');
       this.pendingTurn = false;
       this.geminiTyping = false;
       this.activeClientMessageId = null;
@@ -164,7 +326,6 @@ export class ChatComponent implements AfterViewChecked {
 
   handleComposerKeydown(event: KeyboardEvent): void {
     if (event.isComposing || event.key !== 'Enter' || event.shiftKey) return;
-
     event.preventDefault();
     this.send();
   }
@@ -172,6 +333,10 @@ export class ChatComponent implements AfterViewChecked {
   retry(message: DisplayMessage): void {
     const clientMessageId = message.client_message_id;
     if (message.deliveryState !== 'failed' || !clientMessageId) return;
+    if (this.selectedConversationEnded) {
+      this.errorMessage = 'This conversation has ended and cannot receive more messages.';
+      return;
+    }
     if (this.connectionState !== 'connected') {
       this.errorMessage = 'The real-time connection is unavailable. Reconnect and try again.';
       return;
@@ -191,7 +356,7 @@ export class ChatComponent implements AfterViewChecked {
       return;
     }
 
-    this.setOptimisticDeliveryState(clientMessageId, 'sending');
+    this.setMessageDeliveryState(clientMessageId, 'sending');
     this.activeClientMessageId = clientMessageId;
     this.pendingTurn = true;
     this.geminiTyping = false;
@@ -203,9 +368,91 @@ export class ChatComponent implements AfterViewChecked {
     return (
       this.connectionState === 'connected' &&
       !this.pendingTurn &&
+      !this.conversationActionId &&
+      !this.listeningSessionActive &&
+      !this.selectedConversationEnded &&
       !!this.messageControl.value.trim() &&
       this.messageControl.valid
     );
+  }
+
+  canStartListening(): boolean {
+    return (
+      this.recognitionSupported &&
+      !!this.selectedConversationId &&
+      !this.selectedConversationEnded &&
+      !this.pendingTurn &&
+      !this.conversationActionId &&
+      this.connectionState === 'connected'
+    );
+  }
+
+  toggleListening(): void {
+    if (this.listeningSessionActive) {
+      this.speech.stopListening();
+      return;
+    }
+    if (!this.canStartListening()) return;
+
+    this.stopSpeaking();
+    this.voiceError = '';
+    const conversationId = this.selectedConversationId;
+    this.listeningSessionActive = true;
+    let subscription: Subscription | null = null;
+    subscription = this.speech
+      .startListening()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (transcript) => {
+          if (
+            conversationId !== this.selectedConversationId ||
+            !conversationId ||
+            this.selectedConversationEnded
+          )
+            return;
+          const draft = this.messageControl.value.trimEnd();
+          const combinedTranscript = draft ? `${draft} ${transcript}` : transcript;
+          if (combinedTranscript.length > 4000)
+            this.voiceError = 'The transcript was shortened to the 4,000-character limit.';
+          this.messageControl.setValue(combinedTranscript.slice(0, 4000));
+          this.messageControl.markAsTouched();
+        },
+        error: (error: unknown) => {
+          this.voiceError =
+            error instanceof Error ? error.message : 'Speech recognition could not be completed.';
+          this.finishListeningSubscription(subscription);
+        },
+        complete: () => this.finishListeningSubscription(subscription),
+      });
+    this.listeningSubscription = subscription.closed ? null : subscription;
+    if (subscription.closed) this.listeningSessionActive = false;
+  }
+
+  toggleMessageSpeech(message: DisplayMessage): void {
+    if (this.speakingMessageId === message.id) {
+      this.stopSpeaking();
+      return;
+    }
+    if (!this.synthesisSupported) return;
+    this.cancelListening();
+    this.voiceError = '';
+    this.speech.speak(message.content);
+    this.speakingMessageId = message.id;
+  }
+
+  isReadingMessage(message: DisplayMessage): boolean {
+    return this.speakingMessageId === message.id;
+  }
+
+  updateReadRepliesAloud(event: Event): void {
+    const input = event.target as HTMLInputElement | null;
+    this.readRepliesAloud = input?.checked ?? false;
+    try {
+      window.localStorage.setItem(AUTO_READ_STORAGE_KEY, String(this.readRepliesAloud));
+    } catch {
+      this.errorMessage = 'The read-aloud preference could not be saved in this browser.';
+    }
+    if (!this.readRepliesAloud) this.stopSpeaking();
   }
 
   trackConversation(_index: number, conversation: Conversation): string {
@@ -225,7 +472,7 @@ export class ChatComponent implements AfterViewChecked {
       )
       .subscribe({
         next: (conversations) => {
-          this.conversations = conversations;
+          this.conversations = [...conversations];
           if (conversations[0]) this.selectConversation(conversations[0]);
           else this.createConversation();
         },
@@ -234,16 +481,27 @@ export class ChatComponent implements AfterViewChecked {
   }
 
   private loadMessages(conversationId: string): void {
+    const requestId = ++this.messageLoadRequestId;
     this.loadingMessages = true;
     this.chat
       .loadMessages(conversationId)
       .pipe(
-        finalize(() => (this.loadingMessages = false)),
+        finalize(() => {
+          if (
+            requestId === this.messageLoadRequestId &&
+            this.selectedConversationId === conversationId
+          )
+            this.loadingMessages = false;
+        }),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe({
         next: (messages) => {
-          if (this.selectedConversationId !== conversationId) return;
+          if (
+            requestId !== this.messageLoadRequestId ||
+            this.selectedConversationId !== conversationId
+          )
+            return;
 
           const persistedClientMessageIds = new Set(
             messages
@@ -263,7 +521,13 @@ export class ChatComponent implements AfterViewChecked {
           ]);
           this.shouldScroll = true;
         },
-        error: () => (this.errorMessage = 'Could not load this conversation.'),
+        error: () => {
+          if (
+            requestId === this.messageLoadRequestId &&
+            this.selectedConversationId === conversationId
+          )
+            this.errorMessage = 'Could not load this conversation.';
+        },
       });
   }
 
@@ -283,8 +547,24 @@ export class ChatComponent implements AfterViewChecked {
     }
     if (payload.message.conversation_id !== this.selectedConversationId) return;
 
+    const messageAlreadyDisplayed = this.messages.some(
+      (message) => message.id === payload.message.id,
+    );
     this.messages = this.uniqueMessages([...this.messages, payload.message]);
     this.shouldScroll = true;
+    if (
+      payload.message.role === 'assistant' &&
+      !messageAlreadyDisplayed &&
+      !this.selectedConversationEnded &&
+      this.readRepliesAloud &&
+      this.synthesisSupported &&
+      !this.spokenMessageIds.has(payload.message.id)
+    ) {
+      this.spokenMessageIds.add(payload.message.id);
+      this.cancelListening();
+      this.speech.speak(payload.message.content);
+      this.speakingMessageId = payload.message.id;
+    }
   }
 
   private receiveError(payload: ChatErrorPayload): void {
@@ -294,8 +574,20 @@ export class ChatComponent implements AfterViewChecked {
       : undefined;
     const matchesActiveTurn = !!clientMessageId && clientMessageId === this.activeClientMessageId;
 
-    if (clientMessageId && optimisticMessage)
-      this.setOptimisticDeliveryState(clientMessageId, 'failed');
+    if (payload.code === 'CONVERSATION_ENDED' && payload.conversationId) {
+      const endedAt = new Date().toISOString();
+      this.conversations = this.conversations.map((conversation) =>
+        conversation.id === payload.conversationId && !conversation.ended_at
+          ? { ...conversation, ended_at: endedAt }
+          : conversation,
+      );
+      if (payload.conversationId === this.selectedConversationId) {
+        this.cancelListening();
+        this.updateComposerAvailability();
+      }
+    }
+
+    if (clientMessageId) this.setMessageDeliveryState(clientMessageId, 'failed');
     if (matchesActiveTurn) {
       this.pendingTurn = false;
       this.activeClientMessageId = null;
@@ -308,18 +600,18 @@ export class ChatComponent implements AfterViewChecked {
     this.geminiTyping = false;
   }
 
-  private setOptimisticDeliveryState(
+  private setMessageDeliveryState(
     clientMessageId: string,
     deliveryState: NonNullable<DisplayMessage['deliveryState']>,
   ): void {
     const optimisticMessage = this.optimisticMessages.get(clientMessageId);
-    if (!optimisticMessage) return;
-
-    const updatedMessage: DisplayMessage = { ...optimisticMessage, deliveryState };
-    this.optimisticMessages.set(clientMessageId, updatedMessage);
+    if (optimisticMessage) {
+      const updatedMessage: DisplayMessage = { ...optimisticMessage, deliveryState };
+      this.optimisticMessages.set(clientMessageId, updatedMessage);
+    }
     this.messages = this.messages.map((message) =>
-      message.client_message_id === clientMessageId && message.deliveryState
-        ? updatedMessage
+      message.role === 'user' && message.client_message_id === clientMessageId
+        ? { ...message, deliveryState }
         : message,
     );
   }
@@ -346,6 +638,44 @@ export class ChatComponent implements AfterViewChecked {
       (left, right) =>
         left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id),
     );
+  }
+
+  private updateComposerAvailability(): void {
+    if (!this.selectedConversation || this.selectedConversationEnded)
+      this.messageControl.disable({ emitEvent: false });
+    else this.messageControl.enable({ emitEvent: false });
+  }
+
+  private cancelListening(): void {
+    this.listeningSubscription?.unsubscribe();
+    this.listeningSubscription = null;
+    this.listeningSessionActive = false;
+    this.speech.stopListening();
+  }
+
+  private stopSpeaking(): void {
+    this.speech.stopSpeaking();
+    this.speakingMessageId = null;
+  }
+
+  private stopVoice(): void {
+    this.cancelListening();
+    this.stopSpeaking();
+  }
+
+  private finishListeningSubscription(subscription: Subscription | null): void {
+    if (subscription && this.listeningSubscription !== subscription) return;
+    this.listeningSubscription = null;
+    this.listeningSessionActive = false;
+  }
+
+  private loadAutoReadPreference(): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage.getItem(AUTO_READ_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
   }
 
   private newClientMessageId(): string {

@@ -12,6 +12,7 @@ export interface User {
 export interface Conversation {
   id: string;
   user_id: string;
+  title: string;
   started_at: string;
   ended_at: string | null;
   language: string;
