@@ -13,14 +13,15 @@ export class SocketService {
 
   /**
    * Replaces any existing socket with an authenticated connection using bounded retries.
-   * @param token Bearer token sent in the Socket.IO authentication handshake.
+   * @param token Bearer token sent in the Socket.IO authentication handshake. Omitted only when
+   * the backend runs with its development authentication bypass, which ignores tokens.
    * @returns Nothing; connection state is published through `connectionState$`.
    */
-  connect(token: string): void {
+  connect(token?: string): void {
     this.disconnect();
     this.state.next('connecting');
     this.socket = io(environment.socketUrl, {
-      auth: { token },
+      auth: token ? { token } : {},
       autoConnect: false,
       reconnection: true,
       reconnectionDelay: 1000,

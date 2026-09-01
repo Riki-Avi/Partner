@@ -6,9 +6,10 @@ import type {
   ClientEvents,
   ServerEvents,
 } from '@voice-chat/shared';
+import { authBypassEnabled, resolveBypassUserId } from '../config/dev-auth.config.js';
 import { supabase } from '../config/supabase.config.js';
 import { ConversationEndedError } from '../middleware/error.middleware.js';
-import { databaseService } from './database.service.js';
+import { databaseService, type NewCorrection } from './database.service.js';
 import { geminiService } from './gemini.service.js';
 
 interface SocketData {
@@ -31,6 +32,13 @@ export class SocketService {
     });
     this.io.use(async (socket, next) => {
       try {
+        // Development bypass: accept the handshake and attribute it to a fixed user.
+        if (authBypassEnabled) {
+          socket.data.userId = await resolveBypassUserId();
+          next();
+          return;
+        }
+
         const token = socket.handshake.auth['token'] as unknown;
         if (typeof token !== 'string' || !token)
           return next(new Error('Authentication token required'));
@@ -38,7 +46,8 @@ export class SocketService {
         if (error || !data.user) return next(new Error('Invalid or expired token'));
         socket.data.userId = data.user.id;
         next();
-      } catch {
+      } catch (error) {
+        console.error('Socket authentication failed:', error);
         next(new Error('WebSocket authentication failed'));
       }
     });
@@ -145,20 +154,37 @@ export class SocketService {
       );
       if (persistedReply) {
         this.io?.to(room).emit('chat:message', { message: persistedReply, clientMessageId });
+        // The turn already completed, so its corrections are replayed from storage rather than
+        // asking the tutor to find them again, which would duplicate the learner's study rows.
+        await this.emitPersistedCorrections(
+          room,
+          conversationId,
+          userId,
+          userMessage.id,
+          clientMessageId,
+        );
         return;
       }
 
       typing = true;
       this.io?.to(room).emit('chat:typing', { conversationId, typing: true });
       const history = await databaseService.getOwnedConversationMessages(conversationId, userId);
-      const reply = await geminiService.generateReply(history);
+      const turn = await geminiService.generateTurn(history);
       const assistantMessage = await databaseService.saveOwnedAssistantReply(
         conversationId,
         userId,
         userMessage.id,
-        reply,
+        turn.reply,
       );
       this.io?.to(room).emit('chat:message', { message: assistantMessage, clientMessageId });
+      await this.persistCorrections(
+        room,
+        conversationId,
+        userId,
+        userMessage.id,
+        clientMessageId,
+        turn.corrections,
+      );
     } catch (error) {
       if (error instanceof ConversationEndedError) {
         this.emitChatError(socket, {
@@ -177,6 +203,56 @@ export class SocketService {
     } finally {
       this.busyConversations.delete(conversationId);
       if (typing) this.io?.to(room).emit('chat:typing', { conversationId, typing: false });
+    }
+  }
+
+  /**
+   * Stores the corrections for a completed turn and delivers them to the learner.
+   *
+   * Failures are swallowed deliberately: by this point the reply is persisted and already on its
+   * way to the browser, so losing the study rows must not turn a successful turn into an error the
+   * learner is told to retry.
+   */
+  private async persistCorrections(
+    room: string,
+    conversationId: string,
+    userId: string,
+    messageId: string,
+    clientMessageId: string,
+    corrections: readonly NewCorrection[],
+  ): Promise<void> {
+    if (corrections.length === 0) return;
+    try {
+      const saved = await databaseService.saveOwnedCorrections(messageId, userId, corrections);
+      if (saved.length === 0) return;
+      await databaseService.markMessageWithCorrections(messageId);
+      this.io?.to(room).emit('chat:corrections', {
+        conversationId,
+        messageId,
+        clientMessageId,
+        corrections: saved,
+      });
+    } catch (error) {
+      console.error(`Could not persist corrections for message ${messageId}:`, error);
+    }
+  }
+
+  /** Re-delivers the corrections of a turn that had already completed before a retry. */
+  private async emitPersistedCorrections(
+    room: string,
+    conversationId: string,
+    userId: string,
+    messageId: string,
+    clientMessageId: string,
+  ): Promise<void> {
+    try {
+      const corrections = await databaseService.getOwnedMessageCorrections(messageId, userId);
+      if (corrections.length === 0) return;
+      this.io
+        ?.to(room)
+        .emit('chat:corrections', { conversationId, messageId, clientMessageId, corrections });
+    } catch (error) {
+      console.error(`Could not replay corrections for message ${messageId}:`, error);
     }
   }
 

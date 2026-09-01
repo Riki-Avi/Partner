@@ -39,6 +39,7 @@ async function seed(): Promise<void> {
     );
     await database.saveCorrection(
       message.id,
+      user.id,
       'grammar',
       'She go',
       'She goes',

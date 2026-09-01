@@ -14,9 +14,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "node -e \"console.log('Shared: no optional tests configured')\""
+    "test": "tsx --test \"test/**/*.test.ts\""
   },
   "devDependencies": {
+    "tsx": "4.19.2",
     "typescript": "5.5.4"
   }
 }

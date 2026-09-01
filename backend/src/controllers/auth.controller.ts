@@ -116,5 +116,55 @@ export class AuthController {
       next(error);
     }
   }
+
+  /**
+   * Creates a fresh temporary guest user starting from zero and returns authentication data.
+   */
+  async loginAsGuest(_req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const guestRand = Math.random().toString(36).substring(2, 8);
+      const email = `guest_${Date.now()}_${guestRand}@guest.voicechat.local`;
+      const password = `Guest_${Math.random().toString(36).substring(2, 12)}!9A`;
+      const name = 'Guest Learner';
+
+      const { data, error } = await supabase.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: { is_guest: true },
+      });
+
+      if (error || !data.user) {
+        throw new UnauthorizedError(`Unable to create guest session: ${error?.message}`);
+      }
+
+      const { data: sessionData, error: sessionError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (sessionError || !sessionData.session) {
+        throw new UnauthorizedError('Unable to generate guest session token');
+      }
+
+      const user = await databaseService.createUser(data.user.id, email, name);
+      await databaseService.createUserProgress(data.user.id);
+      await databaseService.upsertUserPreferences(data.user.id, {
+        interests: ['everyday-life', 'culture', 'technology', 'movies'],
+        goals: ['casual-fluency'],
+        tone: 'friendly',
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          user,
+          token: sessionData.session.access_token,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 export const authController = new AuthController();

@@ -42,7 +42,23 @@ function passwordsMatch(control: AbstractControl): ValidationErrors | null {
       <p class="error" *ngIf="error">{{ error }}</p>
       <button [disabled]="form.invalid || loading">{{ loading ? 'Creating…' : 'Sign up' }}</button>
     </form>
-    <p>Already registered? <a routerLink="/login">Log in</a></p>
+    <div class="guest-divider">
+      <span>o</span>
+    </div>
+    <button
+      type="button"
+      class="guest-btn"
+      [disabled]="loading || guestLoading"
+      (click)="loginAsGuest()"
+    >
+      <span>👤</span>
+      <span>{{
+        guestLoading
+          ? 'Preparando sesión de invitado…'
+          : 'Iniciar sesión como invitado (Probar gratis)'
+      }}</span>
+    </button>
+    <p style="margin-top: 1.5rem">Already registered? <a routerLink="/login">Log in</a></p>
   </section>`,
 })
 export class SignupComponent {
@@ -59,7 +75,9 @@ export class SignupComponent {
     { validators: passwordsMatch },
   );
   loading = false;
+  guestLoading = false;
   error = '';
+
   submit(): void {
     if (this.form.invalid) return;
     const { name, email, password } = this.form.getRawValue();
@@ -69,9 +87,22 @@ export class SignupComponent {
       .signup({ name, email, password })
       .pipe(finalize(() => (this.loading = false)))
       .subscribe({
-        next: () => void this.router.navigate(['/profile']),
+        next: () => void this.router.navigate(['/partner']),
         error: (e: { error?: { error?: { message?: string } } }) =>
           (this.error = e.error?.error?.message ?? 'Signup failed'),
+      });
+  }
+
+  loginAsGuest(): void {
+    this.guestLoading = true;
+    this.error = '';
+    this.auth
+      .loginAsGuest()
+      .pipe(finalize(() => (this.guestLoading = false)))
+      .subscribe({
+        next: () => void this.router.navigate(['/partner']),
+        error: (e: { error?: { error?: { message?: string } } }) =>
+          (this.error = e.error?.error?.message ?? 'Guest login failed. Please try again.'),
       });
   }
 }

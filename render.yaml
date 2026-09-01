@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: voice-chat-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    healthCheckPath: /api/speech/formats
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+      - key: AUTH_BYPASS
+        value: false
+      - key: FRONTEND_URL
+        sync: false # Set to your Vercel frontend URL (e.g. https://your-app.vercel.app)
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_MODEL_ID
+        value: eleven_flash_v2_5
+      - key: ELEVENLABS_STT_MODEL_ID
+        value: scribe_v2
+      - key: ELEVENLABS_STT_LANGUAGE
+        value: eng
+      - key: ELEVENLABS_OUTPUT_FORMAT
+        value: mp3_44100_128

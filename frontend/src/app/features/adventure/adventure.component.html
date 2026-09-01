@@ -1,0 +1,164 @@
+<div class="adventure-container">
+  <!-- Top Story Header & Party Cast -->
+  <header class="story-header" *ngIf="adventure">
+    <div class="header-main">
+      <div class="title-area">
+        <span class="theme-tag">🗺️ {{ adventure.theme }}</span>
+        <h1>{{ adventure.title }}</h1>
+        <p class="setting-desc">{{ adventure.setting }}</p>
+      </div>
+
+      <div class="header-actions">
+        <button class="btn-reset" (click)="resetStory()" [disabled]="resetting || submitting">
+          <span *ngIf="!resetting">⚔️ New Adventure</span>
+          <span *ngIf="resetting">Generating World...</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Companions Cast Banner -->
+    <div class="party-roster">
+      <div class="party-label">Your Party:</div>
+      <div class="party-members">
+        <div
+          class="party-card"
+          *ngFor="let char of adventure.characters"
+          [attr.data-role]="char.role"
+        >
+          <span class="char-avatar">{{ char.avatar_emoji }}</span>
+          <div class="char-info">
+            <span class="char-name">{{ char.name }}</span>
+            <span class="char-role">{{ getRoleBadge(char.role) }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Loading State -->
+  <div class="loading-state" *ngIf="loading">
+    <div class="spinner"></div>
+    <p>Summoning your companions and shaping the realm from your chats...</p>
+  </div>
+
+  <!-- Error Banner -->
+  <div class="error-banner" *ngIf="error">
+    ⚠️ {{ error }}
+    <button class="btn-retry" (click)="loadActiveAdventure()">Retry</button>
+  </div>
+
+  <!-- Story Interactive Dialogue Log -->
+  <div class="adventure-main" *ngIf="!loading && adventure">
+    <div class="dialogue-feed" #scrollContainer>
+      <div
+        *ngFor="let turn of adventure.turns"
+        class="turn-entry"
+        [ngClass]="'role-' + turn.speaker_role"
+      >
+        <!-- NARRATOR TURN -->
+        <div *ngIf="turn.speaker_role === 'narrator'" class="narrator-card">
+          <div class="narrator-icon">📜</div>
+          <div class="narrator-text">{{ turn.content }}</div>
+        </div>
+
+        <!-- USER TURN -->
+        <div *ngIf="turn.speaker_role === 'user'" class="user-turn">
+          <div class="user-bubble">
+            <div class="bubble-header">
+              <span class="speaker-label">You</span>
+            </div>
+            <p class="bubble-text">{{ turn.content }}</p>
+          </div>
+
+          <!-- In-Line Corrections / Learning Box -->
+          <div class="corrections-box" *ngIf="turn.corrections && turn.corrections.length > 0">
+            <div class="corr-title">💡 Helpful English Tip:</div>
+            <div class="corr-item" *ngFor="let corr of turn.corrections">
+              <div class="corr-diff">
+                <span class="corr-bad">"{{ corr.original }}"</span>
+                <span class="corr-arrow">➔</span>
+                <span class="corr-good">"{{ corr.corrected }}"</span>
+              </div>
+              <p class="corr-explanation">{{ corr.explanation }}</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- COMPANION TURN -->
+        <div
+          *ngIf="turn.speaker_role !== 'narrator' && turn.speaker_role !== 'user'"
+          class="companion-turn"
+          [attr.data-role]="turn.speaker_role"
+        >
+          <div class="companion-avatar">
+            {{ getCharacter(turn)?.avatar_emoji || '👤' }}
+          </div>
+          <div class="companion-content">
+            <div class="companion-header">
+              <span class="companion-name">{{ turn.speaker_name }}</span>
+              <span class="companion-role-pill">{{ getRoleBadge(turn.speaker_role) }}</span>
+              <button
+                class="btn-listen"
+                (click)="playAudio(turn)"
+                [title]="speakingTurnId === turn.id ? 'Stop audio' : 'Listen aloud'"
+              >
+                {{ speakingTurnId === turn.id ? '⏹️ Stop' : '🔊 Listen' }}
+              </button>
+            </div>
+            <div class="companion-speech">"{{ turn.content }}"</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Turn Submitting Loader -->
+      <div class="submitting-indicator" *ngIf="submitting">
+        <span class="pulse-dot"></span>
+        <span>Your companions are reacting and the story is unfolding...</span>
+      </div>
+    </div>
+
+    <!-- Interactive Choice Chips (from latest turn) -->
+    <div class="action-chips-dock" *ngIf="adventure.turns.length > 0">
+      <div
+        class="chips-container"
+        *ngIf="adventure.turns[adventure.turns.length - 1].action_chips as chips"
+      >
+        <button
+          *ngFor="let chip of chips"
+          class="choice-chip"
+          (click)="selectChip(chip)"
+          [disabled]="submitting"
+        >
+          💬 {{ chip }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Player Dialogue Input Dock -->
+    <div class="player-input-dock">
+      <div class="input-card">
+        <textarea
+          [(ngModel)]="userInput"
+          (keydown)="onKeyDown($event)"
+          placeholder="Speak or type your action in English... (e.g. 'I draw my sword and ask Master Shen which path to take')"
+          rows="2"
+          [disabled]="submitting"
+        ></textarea>
+
+        <div class="input-footer">
+          <span class="input-hint">Enter to send · Shift+Enter for new line</span>
+
+          <div class="action-buttons">
+            <button
+              class="btn-send"
+              (click)="sendTurn()"
+              [disabled]="!userInput.trim() || submitting"
+            >
+              <span>{{ submitting ? 'Thinking...' : 'Respond ⚔️' }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -9,8 +9,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
     "seed": "tsx scripts/seed.ts",
+    "migrate": "tsx scripts/migrate.ts",
     "lint": "eslint .",
-    "test": "node -e \"console.log('Backend: no optional tests configured')\""
+    "test": "tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@supabase/supabase-js": "2.47.10",
@@ -24,7 +25,9 @@
     "@types/cors": "2.8.17",
     "@types/express": "5.0.0",
     "@types/node": "22.10.5",
+    "@types/pg": "8.11.10",
     "nodemon": "3.1.9",
+    "pg": "8.13.1",
     "tsx": "4.19.2",
     "typescript": "5.5.4"
   }

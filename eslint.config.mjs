@@ -20,4 +20,11 @@ export default tseslint.config(
     files: ['frontend/**/*.ts'],
     languageOptions: { globals: globals.browser },
   },
+  {
+    files: ['**/*.test.ts', '**/test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unused-vars': 'off',
+    },
+  },
 );

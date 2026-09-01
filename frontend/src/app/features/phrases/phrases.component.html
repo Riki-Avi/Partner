@@ -1,0 +1,315 @@
+<section class="phrases">
+  <header class="phrases-heading">
+    <div>
+      <p class="eyebrow">English tutor</p>
+      <h1>My phrases</h1>
+      <p class="muted">
+        Save anything you want to say in English. Translate it and practise it whenever you have
+        time.
+      </p>
+    </div>
+    <dl class="stats" *ngIf="stats">
+      <div>
+        <dt>To practise</dt>
+        <dd>{{ stats.pending }}</dd>
+      </div>
+      <div>
+        <dt>Untranslated</dt>
+        <dd>{{ stats.untranslated }}</dd>
+      </div>
+      <div>
+        <dt>Mastered</dt>
+        <dd>{{ stats.mastered }}</dd>
+      </div>
+    </dl>
+  </header>
+
+  <form class="capture" (submit)="handleSubmit($event)">
+    <label class="capture-field">
+      <span>Phrase</span>
+      <div class="capture-input">
+        <input
+          type="text"
+          [formControl]="contentControl"
+          [maxlength]="maxPhraseLength"
+          placeholder="Something you want to say, in Spanish or English…"
+          autocomplete="off"
+        />
+        <button
+          type="button"
+          class="mic-button"
+          *ngIf="recordingSupported"
+          [ngClass]="{ recording: isDictating('content') }"
+          [disabled]="isTranscribing || (!isDictating('content') && !canStartDictation())"
+          [attr.aria-pressed]="isDictating('content')"
+          [attr.aria-label]="
+            isDictating('content') ? 'Stop dictating the phrase' : 'Dictate the phrase'
+          "
+          (click)="toggleDictation('content')"
+        >
+          {{
+            isDictating('content') && isTranscribing
+              ? 'Transcribing…'
+              : isDictating('content')
+                ? 'Stop mic'
+                : 'Mic'
+          }}
+        </button>
+      </div>
+    </label>
+    <label class="capture-field note">
+      <span>Note <em>(optional)</em></span>
+      <div class="capture-input">
+        <input
+          type="text"
+          [formControl]="noteControl"
+          maxlength="500"
+          placeholder="Where you heard it, or why it matters"
+          autocomplete="off"
+        />
+        <button
+          type="button"
+          class="mic-button"
+          *ngIf="recordingSupported"
+          [ngClass]="{ recording: isDictating('note') }"
+          [disabled]="isTranscribing || (!isDictating('note') && !canStartDictation())"
+          [attr.aria-pressed]="isDictating('note')"
+          [attr.aria-label]="isDictating('note') ? 'Stop dictating the note' : 'Dictate the note'"
+          (click)="toggleDictation('note')"
+        >
+          {{
+            isDictating('note') && isTranscribing
+              ? 'Transcribing…'
+              : isDictating('note')
+                ? 'Stop mic'
+                : 'Mic'
+          }}
+        </button>
+      </div>
+    </label>
+    <button type="submit" class="primary-action" [disabled]="!canSave">
+      {{ saving ? 'Saving…' : 'Save phrase' }}
+    </button>
+  </form>
+
+  <div class="voice-status" aria-live="polite">
+    <p *ngIf="isListening">Recording… Say it, then choose Stop mic.</p>
+    <p *ngIf="isTranscribing">Transcribing your recording…</p>
+    <p *ngIf="voiceError" class="voice-error" role="alert">{{ voiceError }}</p>
+    <p *ngIf="!recordingSupported" class="muted">
+      Dictation is not supported in this browser. Chrome, Edge, or Firefox is recommended.
+    </p>
+  </div>
+
+  <div class="controls">
+    <div class="filter-group" role="group" aria-label="Filter phrases">
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'pending' }"
+        [attr.aria-pressed]="filter === 'pending'"
+        (click)="setFilter('pending')"
+      >
+        To practise
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'untranslated' }"
+        [attr.aria-pressed]="filter === 'untranslated'"
+        (click)="setFilter('untranslated')"
+      >
+        Untranslated
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'mastered' }"
+        [attr.aria-pressed]="filter === 'mastered'"
+        (click)="setFilter('mastered')"
+      >
+        Mastered
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'all' }"
+        [attr.aria-pressed]="filter === 'all'"
+        (click)="setFilter('all')"
+      >
+        All
+      </button>
+    </div>
+
+    <div class="filter-group" role="group" aria-label="View mode">
+      <button
+        type="button"
+        [ngClass]="{ active: mode === 'list' }"
+        [attr.aria-pressed]="mode === 'list'"
+        (click)="setMode('list')"
+      >
+        List
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: mode === 'practice' }"
+        [attr.aria-pressed]="mode === 'practice'"
+        (click)="setMode('practice')"
+      >
+        Practice
+      </button>
+    </div>
+  </div>
+
+  <p class="phrases-error" *ngIf="errorMessage" role="alert">{{ errorMessage }}</p>
+  <p class="muted" *ngIf="loading">Loading your phrases…</p>
+
+  <div class="empty-state" *ngIf="!loading && phrases.length === 0">
+    <strong>Nothing saved yet</strong>
+    <span>Type a phrase above and save it. Tonight it will be waiting for you here.</span>
+  </div>
+
+  <ol class="phrase-list" *ngIf="!loading && mode === 'list' && phrases.length">
+    <li
+      class="phrase-card"
+      *ngFor="let phrase of phrases; trackBy: trackPhrase"
+      [ngClass]="{ mastered: phrase.mastered }"
+    >
+      <div class="phrase-meta">
+        <span class="chip" *ngIf="phrase.source_language">{{ phrase.source_language }}</span>
+        <span class="chip subtle" *ngIf="phrase.mastered">Mastered</span>
+        <time [attr.datetime]="phrase.created_at">{{
+          phrase.created_at | date: 'mediumDate'
+        }}</time>
+        <span class="muted" *ngIf="phrase.review_count">Practised {{ phrase.review_count }}×</span>
+      </div>
+
+      <p class="phrase-text">{{ phrase.content }}</p>
+      <p class="phrase-note muted" *ngIf="phrase.note">{{ phrase.note }}</p>
+
+      <div class="phrase-translation" *ngIf="phrase.translation">
+        <p class="right">
+          <strong>{{ phrase.translation }}</strong>
+        </p>
+        <p class="explanation" *ngIf="phrase.explanation">{{ phrase.explanation }}</p>
+      </div>
+
+      <div class="phrase-actions">
+        <button
+          type="button"
+          *ngIf="!phrase.translation"
+          class="primary-action"
+          [disabled]="busyId !== null"
+          (click)="translate(phrase)"
+        >
+          {{ busyId === phrase.id ? 'Translating…' : 'Translate' }}
+        </button>
+        <button
+          type="button"
+          *ngIf="phrase.translation && synthesisSupported"
+          [attr.aria-label]="
+            isSpeaking(phrase) ? 'Stop reading the translation' : 'Listen to the translation'
+          "
+          (click)="toggleSpeak(phrase)"
+        >
+          {{ isSpeaking(phrase) ? 'Stop' : 'Listen' }}
+        </button>
+        <button
+          type="button"
+          *ngIf="!phrase.mastered"
+          [disabled]="busyId !== null"
+          (click)="practiseAgain(phrase)"
+        >
+          Practised it
+        </button>
+        <button
+          type="button"
+          *ngIf="!phrase.mastered"
+          class="primary-action"
+          [disabled]="busyId !== null"
+          (click)="markMastered(phrase)"
+        >
+          I've got it
+        </button>
+        <button
+          type="button"
+          *ngIf="phrase.mastered"
+          [disabled]="busyId !== null"
+          (click)="restore(phrase)"
+        >
+          Practise again
+        </button>
+        <button
+          type="button"
+          class="danger-action"
+          [disabled]="busyId !== null"
+          (click)="remove(phrase)"
+        >
+          Delete
+        </button>
+      </div>
+    </li>
+  </ol>
+
+  <div class="practice" *ngIf="!loading && mode === 'practice' && phrases.length">
+    <div class="practice-done" *ngIf="practiceFinished">
+      <strong>That's the whole set.</strong>
+      <span>Nice work. Come back another day to keep it fresh.</span>
+      <button type="button" class="primary-action" (click)="restartPractice()">Start over</button>
+    </div>
+
+    <div class="flashcard" *ngIf="currentCard as card">
+      <p class="progress muted">Card {{ practiceIndex + 1 }} of {{ phrases.length }}</p>
+      <span class="chip" *ngIf="card.source_language">{{ card.source_language }}</span>
+
+      <p class="prompt">{{ card.content }}</p>
+      <p class="phrase-note muted" *ngIf="card.note">{{ card.note }}</p>
+      <p class="muted" *ngIf="!revealed">How would you say this in English?</p>
+
+      <div class="answer" *ngIf="revealed" aria-live="polite">
+        <p class="right" *ngIf="card.translation">
+          <strong>{{ card.translation }}</strong>
+        </p>
+        <p class="explanation" *ngIf="card.explanation">{{ card.explanation }}</p>
+        <p class="muted" *ngIf="!card.translation">
+          This phrase has no translation yet. Choose Translate to get one.
+        </p>
+      </div>
+
+      <div class="phrase-actions">
+        <button
+          type="button"
+          class="primary-action"
+          *ngIf="!revealed"
+          [disabled]="busyId !== null"
+          (click)="translate(card)"
+        >
+          {{ busyId === card.id ? 'Translating…' : 'Show the answer' }}
+        </button>
+        <button
+          type="button"
+          *ngIf="revealed && card.translation && synthesisSupported"
+          [attr.aria-label]="
+            isSpeaking(card) ? 'Stop reading the translation' : 'Listen to the translation'
+          "
+          (click)="toggleSpeak(card)"
+        >
+          {{ isSpeaking(card) ? 'Stop' : 'Listen' }}
+        </button>
+        <button
+          type="button"
+          *ngIf="revealed"
+          [disabled]="busyId !== null"
+          (click)="practiseAgain(card)"
+        >
+          Keep practising
+        </button>
+        <button
+          type="button"
+          class="primary-action"
+          *ngIf="revealed"
+          [disabled]="busyId !== null"
+          (click)="markMastered(card)"
+        >
+          I've got it
+        </button>
+      </div>
+    </div>
+  </div>
+</section>

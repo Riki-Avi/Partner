@@ -40,3 +40,43 @@ export interface CreateConversationRequest {
 export interface RenameConversationRequest {
   title: string;
 }
+
+export interface SynthesizeSpeechRequest {
+  text: string;
+}
+
+export interface TranscribeSpeechData {
+  text: string;
+}
+
+/** Marks a correction as practised, mastered, or back in the pending pile. */
+export interface ReviewCorrectionRequest {
+  reviewed?: boolean;
+  mastered?: boolean;
+}
+
+export interface CreatePhraseRequest {
+  content: string;
+  note?: string;
+}
+
+/** Updates a saved phrase's note and/or its review progress. */
+export interface UpdatePhraseRequest {
+  note?: string | null;
+  reviewed?: boolean;
+  mastered?: boolean;
+}
+
+export interface SaveFeedbackRequest {
+  conversation_id: string;
+  satisfaction_score: number;
+  tags?: string[];
+  notes?: string | null;
+}
+
+export interface UpdatePreferencesRequest {
+  interests?: string[];
+  goals?: string[];
+  tone?: string;
+  custom_topics?: string;
+}

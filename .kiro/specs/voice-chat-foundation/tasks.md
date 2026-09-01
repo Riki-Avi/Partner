@@ -84,7 +84,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Test that hot-reload works for both frontend and backend changes
   - _Requirements: 1.6, 5.8_
 
-- [ ] 1.8 Checkpoint - Verify project structure
+- [~] 1.8 Checkpoint - Verify project structure
   - Ensure all tests pass
   - Verify `npm run dev` starts both servers successfully
   - Verify README instructions are clear and complete
@@ -250,7 +250,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Test accessing /api/auth/me with invalid token → 401 error
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8_
 
-- [ ] 3.9 Checkpoint - Verify backend authentication
+- [~] 3.9 Checkpoint - Verify backend authentication
   - Ensure all tests pass
   - Test endpoints manually with Postman or curl
   - Verify signup → login → getMe flow works end-to-end
@@ -388,7 +388,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Test 401 handling: expired token → auto logout → redirected to /login
   - _Requirements: 3.9, 3.10, 3.11, 3.12, 3.13_
 
-- [ ] 4.15 Checkpoint - Verify frontend authentication
+- [~] 4.15 Checkpoint - Verify frontend authentication
   - Ensure all tests pass
   - Test complete user flows manually in browser
   - Verify signup → login → profile → logout works end-to-end
@@ -460,7 +460,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Verify backend logs show connection/disconnection events
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7_
 
-- [ ] 5.7 Checkpoint - Verify backend WebSocket
+- [~] 5.7 Checkpoint - Verify backend WebSocket
   - Ensure all tests pass
   - Test WebSocket connection manually using Postman WebSocket or custom script
   - Verify successful connection with valid token
@@ -530,7 +530,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Verify backend logs show connection/disconnection with correct userId
   - _Requirements: 4.8, 4.9, 4.10, 4.11, 4.13_
 
-- [ ] 6.7 Checkpoint - Verify frontend WebSocket
+- [~] 6.7 Checkpoint - Verify frontend WebSocket
   - Ensure all tests pass
   - Test socket connection manually in browser
   - Login → verify connection status shows "Connected" in ProfileComponent
@@ -607,7 +607,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Verify no sensitive files are tracked in git
   - _Requirements: 1.1_
 
-- [ ] 7.7 Manual end-to-end testing
+- [~] 7.7 Manual end-to-end testing
   - Follow README instructions as a new developer would
   - Verify project setup completes in under 15 minutes
   - Test complete user flow: signup → login → profile → logout
@@ -623,7 +623,7 @@ Each task is designed to produce working, testable functionality. The implementa
   - Verify no console errors during normal operation
   - _Requirements: 5.1, 5.7, 5.8_
 
-- [ ] 7.8 Final checkpoint - Phase 1 completion
+- [~] 7.8 Final checkpoint - Phase 1 completion
   - All tests pass without errors
   - All linting passes without errors
   - README is comprehensive and accurate
@@ -651,24 +651,24 @@ Each task is designed to produce working, testable functionality. The implementa
 
 Phase 1 is complete when:
 
-- [ ] User can sign up with valid credentials
-- [ ] Duplicate email signup shows appropriate error
-- [ ] User can log in with correct credentials
-- [ ] Invalid credentials show appropriate error
-- [ ] Authenticated user can access /profile
-- [ ] Unauthenticated user is redirected from /profile to /login
-- [ ] User data displays correctly on profile page
-- [ ] Socket connection establishes after login
-- [ ] Socket connection status displays correctly in ProfileComponent
-- [ ] User can log out successfully
-- [ ] Token persists across browser refresh
-- [ ] All HTTP requests include Authorization header
-- [ ] Database queries respect RLS (user can only see own data)
-- [ ] Backend and frontend run without errors
+- [~] User can sign up with valid credentials
+- [~] Duplicate email signup shows appropriate error
+- [~] User can log in with correct credentials
+- [~] Invalid credentials show appropriate error
+- [~] Authenticated user can access /profile
+- [~] Unauthenticated user is redirected from /profile to /login
+- [~] User data displays correctly on profile page
+- [~] Socket connection establishes after login
+- [~] Socket connection status displays correctly in ProfileComponent
+- [~] User can log out successfully
+- [~] Token persists across browser refresh
+- [~] All HTTP requests include Authorization header
+- [~] Database queries respect RLS (user can only see own data)
+- [~] Backend and frontend run without errors
 - [x] All tests pass (unit and integration)
 - [x] Code is linted and formatted consistently
 - [x] README is comprehensive and accurate
-- [ ] New developer can set up project in under 15 minutes
+- [~] New developer can set up project in under 15 minutes
 
 
 ## Task Dependency Graph

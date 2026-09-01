@@ -10,16 +10,21 @@ import {
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormControl, ReactiveFormsModule, Validators } from '@angular/forms';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { finalize, type Subscription } from 'rxjs';
 import type {
+  ChatCorrectionsPayload,
   ChatErrorPayload,
   ChatMessagePayload,
   ChatTypingPayload,
   ConnectionState,
   Conversation,
+  ConversationFeedback,
+  Correction,
   Message,
 } from '@voice-chat/shared';
 import { ChatService } from '../../core/services/chat.service';
+import { PartnerService } from '../../core/services/partner.service';
 import { SocketService } from '../../core/services/socket.service';
 import { SpeechService } from '../../core/services/speech.service';
 
@@ -34,7 +39,7 @@ const AUTO_READ_STORAGE_KEY = 'voice_chat_read_replies_aloud';
 @Component({
   selector: 'app-chat',
   standalone: true,
-  imports: [DatePipe, NgClass, NgFor, NgIf, ReactiveFormsModule, UpperCasePipe],
+  imports: [DatePipe, NgClass, NgFor, NgIf, ReactiveFormsModule, RouterLink, UpperCasePipe],
   templateUrl: './chat.component.html',
   styleUrl: './chat.component.css',
 })
@@ -59,11 +64,36 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
   errorMessage = '';
   voiceError = '';
   isListening = false;
+  isTranscribing = false;
   listeningSessionActive = false;
   isSpeaking = false;
   speakingMessageId: string | null = null;
   conversationActionId: string | null = null;
   readRepliesAloud = this.loadAutoReadPreference();
+
+  showRatingModal = false;
+  ratingScore = 5;
+  selectedRatingTags: string[] = [];
+  readonly ratingNotesControl = new FormControl('', { nonNullable: true });
+  savingRating = false;
+  ratingSuccessMessage = '';
+  existingFeedback: ConversationFeedback | null = null;
+  readonly availableRatingTags = [
+    'Natural voice 🎙️',
+    'Great topic 💡',
+    'Low latency ⚡',
+    'Helpful corrections 🎯',
+    'Friendly partner 😊',
+    'Fun practice 🚀',
+  ];
+
+  /**
+   * Corrections received live, keyed by the message they describe.
+   *
+   * Held separately from {@link messages} because they arrive after the message is already
+   * rendered, and because reloading history does not refetch them.
+   */
+  readonly correctionsByMessageId = new Map<string, Correction[]>();
 
   private activeClientMessageId: string | null = null;
   private listeningSubscription: Subscription | null = null;
@@ -72,17 +102,22 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
   private readonly optimisticMessages = new Map<string, DisplayMessage>();
   private readonly spokenMessageIds = new Set<string>();
   private readonly chat = inject(ChatService);
+  private readonly partner = inject(PartnerService);
   private readonly speech = inject(SpeechService);
+  private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
-  readonly recognitionSupported = this.speech.recognitionSupported;
+  readonly recordingSupported = this.speech.recordingSupported;
   readonly synthesisSupported = this.speech.synthesisSupported;
 
   constructor() {
     this.socket.connectionState$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((state) => {
       const previousState = this.connectionState;
       this.connectionState = state;
-      if (state !== 'connected' && this.listeningSessionActive) this.cancelListening();
+      // Dictation is deliberately not cancelled here. It only needs REST and the browser
+      // microphone, so a socket blip must not silently discard audio the user already spoke; the
+      // transcript still lands in the composer and sending is what waits for the connection.
       if (this.pendingTurn && state !== 'connected') {
         if (this.activeClientMessageId)
           this.setMessageDeliveryState(this.activeClientMessageId, 'failed');
@@ -107,12 +142,19 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
           this.geminiTyping = payload.typing;
       });
     this.socket
+      .on<ChatCorrectionsPayload>('chat:corrections')
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((payload) => this.receiveCorrections(payload));
+    this.socket
       .on<ChatErrorPayload>('chat:error')
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((payload) => this.receiveError(payload));
     this.speech.listening$
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((listening) => (this.isListening = listening));
+    this.speech.transcribing$
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((transcribing) => (this.isTranscribing = transcribing));
     this.speech.speaking$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((speaking) => {
       this.isSpeaking = speaking;
       if (!speaking) this.speakingMessageId = null;
@@ -157,14 +199,15 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
     this.geminiTyping = false;
     this.updateComposerAvailability();
     this.loadMessages(conversation.id);
+    this.loadFeedback(conversation.id);
   }
 
-  createConversation(): void {
+  createConversation(initialTitle?: string, initialStarter?: string): void {
     if (this.creatingConversation) return;
     this.creatingConversation = true;
     this.errorMessage = '';
     this.chat
-      .create('en', DEFAULT_CONVERSATION_TITLE)
+      .create('en', initialTitle || DEFAULT_CONVERSATION_TITLE)
       .pipe(
         finalize(() => (this.creatingConversation = false)),
         takeUntilDestroyed(this.destroyRef),
@@ -176,9 +219,79 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
             ...this.conversations.filter((item) => item.id !== conversation.id),
           ];
           this.selectConversation(conversation);
+          if (initialStarter) {
+            this.messageControl.setValue(initialStarter);
+          }
         },
         error: () => (this.errorMessage = 'Could not create a conversation. Please try again.'),
       });
+  }
+
+  openRatingModal(): void {
+    if (!this.selectedConversationId) return;
+    this.showRatingModal = true;
+    this.ratingSuccessMessage = '';
+    if (this.existingFeedback) {
+      this.ratingScore = this.existingFeedback.satisfaction_score;
+      this.selectedRatingTags = [...this.existingFeedback.tags];
+      this.ratingNotesControl.setValue(this.existingFeedback.notes || '');
+    } else {
+      this.ratingScore = 5;
+      this.selectedRatingTags = [];
+      this.ratingNotesControl.setValue('');
+    }
+  }
+
+  closeRatingModal(): void {
+    this.showRatingModal = false;
+  }
+
+  setRatingScore(score: number): void {
+    this.ratingScore = score;
+  }
+
+  toggleRatingTag(tag: string): void {
+    if (this.selectedRatingTags.includes(tag)) {
+      this.selectedRatingTags = this.selectedRatingTags.filter((t) => t !== tag);
+    } else {
+      this.selectedRatingTags.push(tag);
+    }
+  }
+
+  submitRating(): void {
+    if (!this.selectedConversationId) return;
+    this.savingRating = true;
+    this.partner
+      .saveFeedback({
+        conversation_id: this.selectedConversationId,
+        satisfaction_score: this.ratingScore,
+        tags: this.selectedRatingTags,
+        notes: this.ratingNotesControl.value.trim() || null,
+      })
+      .pipe(
+        finalize(() => (this.savingRating = false)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (saved) => {
+          this.existingFeedback = saved;
+          this.ratingSuccessMessage = 'Thank you! Your feedback helps your Partner adapt.';
+          setTimeout(() => {
+            this.showRatingModal = false;
+            this.ratingSuccessMessage = '';
+          }, 1500);
+        },
+        error: () => {
+          this.errorMessage = 'Could not save your rating. Please try again.';
+        },
+      });
+  }
+
+  private loadFeedback(conversationId: string): void {
+    this.partner.getConversationFeedback(conversationId).subscribe({
+      next: (feedback) => (this.existingFeedback = feedback),
+      error: () => (this.existingFeedback = null),
+    });
   }
 
   renameConversation(conversation: Conversation): void {
@@ -324,6 +437,20 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
     }
   }
 
+  /**
+   * Handles the composer's native submit event.
+   *
+   * The form binds `submit` rather than `ngSubmit` because it has no `formGroup`: without a
+   * `FormGroupDirective` or `NgForm` on the element, `ngSubmit` is not an output that Angular can
+   * bind, so nothing would cancel the browser's native submission and the page would navigate away
+   * instead of sending the message. Preventing the default here keeps the submit button working
+   * while leaving its `type="submit"` semantics intact for keyboard and assistive technology.
+   */
+  handleSubmit(event: Event): void {
+    event.preventDefault();
+    this.send();
+  }
+
   handleComposerKeydown(event: KeyboardEvent): void {
     if (event.isComposing || event.key !== 'Enter' || event.shiftKey) return;
     event.preventDefault();
@@ -376,20 +503,25 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
     );
   }
 
+  /**
+   * Dictation intentionally does not require a live socket: it records locally and transcribes over
+   * REST, and the transcript is reviewed in the composer before any send.
+   */
   canStartListening(): boolean {
     return (
-      this.recognitionSupported &&
+      this.recordingSupported &&
+      !this.isTranscribing &&
       !!this.selectedConversationId &&
       !this.selectedConversationEnded &&
       !this.pendingTurn &&
-      !this.conversationActionId &&
-      this.connectionState === 'connected'
+      !this.conversationActionId
     );
   }
 
   toggleListening(): void {
     if (this.listeningSessionActive) {
-      this.speech.stopListening();
+      // The upload is already in flight; stopping again would discard a transcript being fetched.
+      if (!this.isTranscribing) this.speech.stopListening();
       return;
     }
     if (!this.canStartListening()) return;
@@ -419,7 +551,7 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
         },
         error: (error: unknown) => {
           this.voiceError =
-            error instanceof Error ? error.message : 'Speech recognition could not be completed.';
+            error instanceof Error ? error.message : 'Dictation could not be completed.';
           this.finishListeningSubscription(subscription);
         },
         complete: () => this.finishListeningSubscription(subscription),
@@ -473,8 +605,18 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
       .subscribe({
         next: (conversations) => {
           this.conversations = [...conversations];
-          if (conversations[0]) this.selectConversation(conversations[0]);
-          else this.createConversation();
+          const topicParam = this.route.snapshot.queryParams['topic'];
+          const starterParam = this.route.snapshot.queryParams['starter'];
+
+          if (topicParam) {
+            const title = String(topicParam).slice(0, MAX_TITLE_LENGTH);
+            this.createConversation(title, starterParam ? String(starterParam) : undefined);
+            void this.router.navigate([], { queryParams: {}, replaceUrl: true });
+          } else if (conversations[0]) {
+            this.selectConversation(conversations[0]);
+          } else {
+            this.createConversation();
+          }
         },
         error: () => (this.errorMessage = 'Could not load your conversations.'),
       });
@@ -567,6 +709,23 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
     }
   }
 
+  /** Attaches the tutor's corrections to the user message they describe. */
+  private receiveCorrections(payload: ChatCorrectionsPayload): void {
+    if (payload.conversationId !== this.selectedConversationId) return;
+    if (!payload.corrections.length) return;
+    this.correctionsByMessageId.set(payload.messageId, payload.corrections);
+    this.shouldScroll = true;
+  }
+
+  /** Corrections to render under a message, if any arrived during this session. */
+  correctionsFor(message: DisplayMessage): Correction[] {
+    return this.correctionsByMessageId.get(message.id) ?? [];
+  }
+
+  trackCorrection(_index: number, correction: Correction): string {
+    return correction.id;
+  }
+
   private receiveError(payload: ChatErrorPayload): void {
     const clientMessageId = payload.clientMessageId;
     const optimisticMessage = clientMessageId
@@ -650,7 +809,7 @@ export class ChatComponent implements AfterViewChecked, OnDestroy {
     this.listeningSubscription?.unsubscribe();
     this.listeningSubscription = null;
     this.listeningSessionActive = false;
-    this.speech.stopListening();
+    this.speech.abortListening();
   }
 
   private stopSpeaking(): void {

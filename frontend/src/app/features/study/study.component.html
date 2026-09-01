@@ -1,0 +1,194 @@
+<section class="study">
+  <header class="study-heading">
+    <div>
+      <p class="eyebrow">English tutor</p>
+      <h1>Study your corrections</h1>
+      <p class="muted">
+        Every mistake the tutor corrected is saved here so you can practise it another day.
+      </p>
+    </div>
+    <dl class="stats" *ngIf="stats">
+      <div>
+        <dt>To practise</dt>
+        <dd>{{ stats.pending }}</dd>
+      </div>
+      <div>
+        <dt>Mastered</dt>
+        <dd>{{ stats.mastered }}</dd>
+      </div>
+      <div>
+        <dt>Total</dt>
+        <dd>{{ stats.total }}</dd>
+      </div>
+    </dl>
+  </header>
+
+  <div class="controls">
+    <div class="filter-group" role="group" aria-label="Filter corrections">
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'pending' }"
+        [attr.aria-pressed]="filter === 'pending'"
+        (click)="setFilter('pending')"
+      >
+        To practise
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'mastered' }"
+        [attr.aria-pressed]="filter === 'mastered'"
+        (click)="setFilter('mastered')"
+      >
+        Mastered
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: filter === 'all' }"
+        [attr.aria-pressed]="filter === 'all'"
+        (click)="setFilter('all')"
+      >
+        All
+      </button>
+    </div>
+
+    <label class="error-type-filter" *ngIf="stats && stats.byErrorType.length">
+      Mistake type
+      <select [value]="errorTypeFilter" (change)="setErrorType($event)">
+        <option value="">All types</option>
+        <option *ngFor="let entry of stats.byErrorType" [value]="entry.error_type">
+          {{ entry.error_type }} ({{ entry.count }})
+        </option>
+      </select>
+    </label>
+
+    <div class="filter-group" role="group" aria-label="View mode">
+      <button
+        type="button"
+        [ngClass]="{ active: mode === 'list' }"
+        [attr.aria-pressed]="mode === 'list'"
+        (click)="setMode('list')"
+      >
+        List
+      </button>
+      <button
+        type="button"
+        [ngClass]="{ active: mode === 'practice' }"
+        [attr.aria-pressed]="mode === 'practice'"
+        (click)="setMode('practice')"
+      >
+        Practice
+      </button>
+    </div>
+  </div>
+
+  <p class="study-error" *ngIf="errorMessage" role="alert">{{ errorMessage }}</p>
+  <p class="muted" *ngIf="loading">Loading your corrections…</p>
+
+  <div class="empty-state" *ngIf="!loading && corrections.length === 0">
+    <strong>Nothing to study yet</strong>
+    <span *ngIf="filter === 'pending'">
+      Keep chatting in English. When the tutor corrects you, the mistake is saved here.
+    </span>
+    <span *ngIf="filter !== 'pending'">No corrections match this filter.</span>
+  </div>
+
+  <ol class="correction-list" *ngIf="!loading && mode === 'list' && corrections.length">
+    <li
+      class="correction-card"
+      *ngFor="let item of corrections; trackBy: trackCorrection"
+      [ngClass]="{ mastered: item.mastered }"
+    >
+      <div class="correction-meta">
+        <span class="chip">{{ item.error_type }}</span>
+        <span class="chip subtle" *ngIf="item.mastered">Mastered</span>
+        <time [attr.datetime]="item.created_at">{{ item.created_at | date: 'mediumDate' }}</time>
+        <span class="muted" *ngIf="item.review_count">Practised {{ item.review_count }}×</span>
+      </div>
+
+      <p class="wrong">
+        <span class="label">You said</span><del>{{ item.original }}</del>
+      </p>
+      <p class="right">
+        <span class="label">Better</span><strong>{{ item.corrected }}</strong>
+      </p>
+      <p class="explanation">{{ item.explanation }}</p>
+      <p class="source muted" *ngIf="item.message_content">
+        From “{{ item.conversation_title }}”: {{ item.message_content }}
+      </p>
+
+      <div class="correction-actions">
+        <button
+          type="button"
+          *ngIf="!item.mastered"
+          [disabled]="updatingId !== null"
+          (click)="practiseAgain(item)"
+        >
+          Practised it
+        </button>
+        <button
+          type="button"
+          *ngIf="!item.mastered"
+          class="primary-action"
+          [disabled]="updatingId !== null"
+          (click)="markMastered(item)"
+        >
+          I've got it
+        </button>
+        <button
+          type="button"
+          *ngIf="item.mastered"
+          [disabled]="updatingId !== null"
+          (click)="restore(item)"
+        >
+          Practise again
+        </button>
+      </div>
+    </li>
+  </ol>
+
+  <div class="practice" *ngIf="!loading && mode === 'practice' && corrections.length">
+    <div class="practice-done" *ngIf="practiceFinished">
+      <strong>That's the whole set.</strong>
+      <span>Nice work. Come back another day to keep it fresh.</span>
+      <button type="button" class="primary-action" (click)="restartPractice()">Start over</button>
+    </div>
+
+    <div class="flashcard" *ngIf="currentCard as card">
+      <p class="progress muted">Card {{ practiceIndex + 1 }} of {{ corrections.length }}</p>
+      <span class="chip">{{ card.error_type }}</span>
+
+      <p class="prompt">{{ card.original }}</p>
+      <p class="muted" *ngIf="!revealed">How would you say this correctly in English?</p>
+
+      <div class="answer" *ngIf="revealed" aria-live="polite">
+        <p class="right">
+          <strong>{{ card.corrected }}</strong>
+        </p>
+        <p class="explanation">{{ card.explanation }}</p>
+      </div>
+
+      <div class="correction-actions">
+        <button type="button" class="primary-action" *ngIf="!revealed" (click)="reveal()">
+          Show the answer
+        </button>
+        <button
+          type="button"
+          *ngIf="revealed"
+          [disabled]="updatingId !== null"
+          (click)="practiseAgain(card)"
+        >
+          Keep practising
+        </button>
+        <button
+          type="button"
+          class="primary-action"
+          *ngIf="revealed"
+          [disabled]="updatingId !== null"
+          (click)="markMastered(card)"
+        >
+          I've got it
+        </button>
+      </div>
+    </div>
+  </div>
+</section>

@@ -7,6 +7,7 @@ import type {
   SignupRequest,
   User,
 } from '@voice-chat/shared';
+import { environment } from '../../../environments/environment';
 import { ApiService } from './api.service';
 import { SocketService } from './socket.service';
 
@@ -41,6 +42,15 @@ export class AuthService {
   login(request: LoginRequest): Observable<AuthResponse> {
     return this.api
       .post<AuthResponse, LoginRequest>('/auth/login', request)
+      .pipe(tap((response) => this.acceptAuth(response)));
+  }
+
+  /**
+   * Creates a fresh guest session starting from scratch without registration.
+   */
+  loginAsGuest(): Observable<AuthResponse> {
+    return this.api
+      .post<AuthResponse, Record<string, never>>('/auth/guest', {})
       .pipe(tap((response) => this.acceptAuth(response)));
   }
 
@@ -98,8 +108,9 @@ export class AuthService {
    * @returns A promise that resolves after restoration or cleanup has completed.
    */
   async checkAuthStatus(): Promise<void> {
-    const token = this.getToken();
-    if (!token) {
+    // The backend bypass ignores tokens, so the development user is adopted without one.
+    const token = environment.authBypass ? undefined : (this.getToken() ?? undefined);
+    if (!environment.authBypass && !token) {
       this.clearSession();
       return;
     }

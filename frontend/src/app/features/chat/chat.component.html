@@ -87,6 +87,16 @@
         </p>
       </div>
       <div class="header-controls">
+        <button
+          type="button"
+          class="rate-chat-btn"
+          *ngIf="selectedConversationId"
+          (click)="openRatingModal()"
+          title="Rate this conversation and give feedback"
+        >
+          <span *ngIf="existingFeedback">⭐ {{ existingFeedback.satisfaction_score }}/5</span>
+          <span *ngIf="!existingFeedback">⭐ Rate chat</span>
+        </button>
         <label class="auto-read-toggle">
           <input
             type="checkbox"
@@ -147,6 +157,20 @@
             {{ isReadingMessage(message) ? 'Stop' : 'Listen' }}
           </button>
         </div>
+
+        <ul
+          class="message-corrections"
+          *ngIf="correctionsFor(message).length as correctionCount"
+          [attr.aria-label]="correctionCount + ' correction(s) saved for study'"
+        >
+          <li *ngFor="let correction of correctionsFor(message); trackBy: trackCorrection">
+            <span class="correction-chip">{{ correction.error_type }}</span>
+            <del>{{ correction.original }}</del>
+            <strong>{{ correction.corrected }}</strong>
+            <span class="correction-explanation">{{ correction.explanation }}</span>
+          </li>
+          <li class="correction-hint">Saved to <a routerLink="/study">Study</a>.</li>
+        </ul>
       </article>
       <div class="typing" *ngIf="geminiTyping">
         <span></span><span></span><span></span> Gemini is typing
@@ -155,15 +179,16 @@
 
     <div class="chat-error" *ngIf="errorMessage" role="alert">{{ errorMessage }}</div>
     <div class="voice-status" aria-live="polite">
-      <p *ngIf="isListening">Listening… Speak clearly, then choose Stop mic.</p>
-      <p *ngIf="isSpeaking">Reading a reply aloud…</p>
+      <p *ngIf="isListening">Recording… Speak clearly, then choose Stop mic.</p>
+      <p *ngIf="isTranscribing">Transcribing your recording…</p>
+      <p *ngIf="isSpeaking">Preparing or reading a natural English reply…</p>
       <p *ngIf="voiceError" class="voice-error" role="alert">{{ voiceError }}</p>
       <p *ngIf="selectedConversationEnded" class="ended-hint">
         This conversation is read-only. Start a new conversation to continue practicing.
       </p>
     </div>
 
-    <form class="composer" (ngSubmit)="send()">
+    <form class="composer" (submit)="handleSubmit($event)">
       <textarea
         [formControl]="messageControl"
         rows="3"
@@ -177,12 +202,12 @@
       <div class="composer-actions">
         <div class="composer-help">
           <small>Enter to send · Shift+Enter for a new line</small>
-          <small id="speech-support-hint" *ngIf="recognitionSupported">
-            Your browser's speech provider may process audio; Partner does not upload it. Review the
-            transcript before sending.
+          <small id="speech-support-hint" *ngIf="recordingSupported">
+            Dictation uploads your recording to the backend for ElevenLabs transcription. The audio
+            is not stored. Review the transcript before sending.
           </small>
-          <small id="speech-support-hint" *ngIf="!recognitionSupported">
-            Mic dictation is not supported in this browser. Chrome or Edge is recommended.
+          <small id="speech-support-hint" *ngIf="!recordingSupported">
+            Mic dictation is not supported in this browser. Chrome, Edge, or Firefox is recommended.
           </small>
           <small *ngIf="!synthesisSupported">
             Listen playback is not supported in this browser.
@@ -193,14 +218,18 @@
           <button
             type="button"
             class="mic-button"
-            [disabled]="!listeningSessionActive && !canStartListening()"
+            [disabled]="isTranscribing || (!listeningSessionActive && !canStartListening())"
             [attr.aria-pressed]="listeningSessionActive"
             [attr.aria-label]="
-              listeningSessionActive ? 'Stop microphone dictation' : 'Start microphone dictation'
+              isTranscribing
+                ? 'Transcribing your recording'
+                : listeningSessionActive
+                  ? 'Stop microphone dictation'
+                  : 'Start microphone dictation'
             "
             (click)="toggleListening()"
           >
-            {{ listeningSessionActive ? 'Stop mic' : 'Mic' }}
+            {{ isTranscribing ? 'Transcribing…' : listeningSessionActive ? 'Stop mic' : 'Mic' }}
           </button>
           <button type="submit" [disabled]="!canSend()">
             {{ pendingTurn ? 'Waiting for Gemini…' : 'Send' }}
@@ -208,5 +237,100 @@
         </div>
       </div>
     </form>
+  </div>
+
+  <!-- Rating Modal Overlay -->
+  <div class="rating-modal-backdrop" *ngIf="showRatingModal" (click)="closeRatingModal()">
+    <div
+      class="rating-modal"
+      (click)="$event.stopPropagation()"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ratingTitle"
+    >
+      <div class="rating-modal-header">
+        <h3 id="ratingTitle">⭐ How was this conversation?</h3>
+        <button
+          type="button"
+          class="close-modal-btn"
+          (click)="closeRatingModal()"
+          aria-label="Close"
+        >
+          &times;
+        </button>
+      </div>
+
+      <p class="rating-modal-sub">
+        Rate your session with your Partner. Your feedback directly tunes future topic
+        recommendations and conversational style.
+      </p>
+
+      <div *ngIf="ratingSuccessMessage" class="rating-success-alert" role="status">
+        {{ ratingSuccessMessage }}
+      </div>
+
+      <div class="stars-selector" role="radiogroup" aria-label="Satisfaction score">
+        <button
+          type="button"
+          *ngFor="let star of [1, 2, 3, 4, 5]"
+          class="star-btn"
+          [class.active]="star <= ratingScore"
+          (click)="setRatingScore(star)"
+          [attr.aria-label]="star + ' stars'"
+        >
+          ★
+        </button>
+        <span class="score-label">
+          {{
+            ratingScore === 5
+              ? '🤩 Amazing!'
+              : ratingScore === 4
+                ? '😊 Great!'
+                : ratingScore === 3
+                  ? '👍 Good'
+                  : ratingScore === 2
+                    ? '😐 Fair'
+                    : '🙁 Needs work'
+          }}
+        </span>
+      </div>
+
+      <div class="rating-tags-section">
+        <span class="tags-label">What went well? (Select all that apply)</span>
+        <div class="tags-row">
+          <button
+            type="button"
+            class="tag-select-chip"
+            *ngFor="let tag of availableRatingTags"
+            [class.selected]="selectedRatingTags.includes(tag)"
+            (click)="toggleRatingTag(tag)"
+          >
+            {{ tag }}
+          </button>
+        </div>
+      </div>
+
+      <div class="rating-notes-field">
+        <label for="ratingNotes">Additional comments (optional):</label>
+        <textarea
+          id="ratingNotes"
+          [formControl]="ratingNotesControl"
+          rows="2"
+          placeholder="E.g. 'Loved the vocabulary suggestions', 'Great speaking speed'…"
+        ></textarea>
+      </div>
+
+      <div class="rating-modal-actions">
+        <button type="button" class="cancel-btn" (click)="closeRatingModal()">Cancel</button>
+        <button
+          type="button"
+          class="submit-rating-btn"
+          [disabled]="savingRating"
+          (click)="submitRating()"
+        >
+          {{ savingRating ? 'Saving…' : 'Save Feedback' }}
+        </button>
+      </div>
+    </div>
   </div>
 </section>

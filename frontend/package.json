@@ -6,7 +6,7 @@
     "start": "ng serve --port 4200",
     "build": "ng build",
     "lint": "eslint src/**/*.ts",
-    "test": "node -e \"console.log('Frontend: no optional tests configured')\""
+    "test": "tsx --test \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@angular/animations": "18.2.13",
@@ -27,6 +27,7 @@
     "@angular-devkit/build-angular": "18.2.13",
     "@angular/cli": "18.2.13",
     "@angular/compiler-cli": "18.2.13",
+    "tsx": "4.19.2",
     "typescript": "5.5.4"
   }
 }

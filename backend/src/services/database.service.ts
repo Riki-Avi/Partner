@@ -1,11 +1,26 @@
 import type {
+  AdventureCharacter,
+  AdventureTurn,
+  AdventureTurnResponse,
+  ChatMemorySnippet,
   CommonError,
   Conversation,
+  ConversationFeedback,
   Correction,
+  CorrectionErrorTypeCount,
+  CorrectionReviewItem,
+  CorrectionStats,
   Message,
   MessageRole,
+  PartnerHubSummary,
+  PartnerRecommendation,
+  PartnerSatisfactionStats,
+  PhraseStats,
+  SavedPhrase,
+  StoryAdventure,
   User,
   UserLevel,
+  UserPreferences,
   UserProgress,
 } from '@voice-chat/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -24,6 +39,69 @@ type MessageChanges = Partial<Pick<Message, 'content' | 'audio_url' | 'has_corre
 type CorrectionChanges = Partial<
   Pick<Correction, 'error_type' | 'original' | 'corrected' | 'explanation'>
 >;
+
+/** Which slice of the study pile a review list should return. */
+export type CorrectionReviewStatus = 'all' | 'pending' | 'mastered';
+
+export interface CorrectionQuery {
+  status?: CorrectionReviewStatus;
+  errorType?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface CorrectionReviewChanges {
+  reviewed?: boolean;
+  mastered?: boolean;
+}
+
+/** A correction to persist, before it has an identity. */
+export interface NewCorrection {
+  errorType: string;
+  original: string;
+  corrected: string;
+  explanation: string;
+}
+
+const MAX_CORRECTION_PAGE_SIZE = 200;
+const DEFAULT_CORRECTION_PAGE_SIZE = 50;
+
+/**
+ * Ceiling on rows scanned to build study statistics. PostgREST cannot group without a database
+ * function, so the two smallest columns are aggregated in process; the cap keeps that bounded for
+ * a learner who has accumulated a very long history.
+ */
+const CORRECTION_STATS_ROW_CAP = 5_000;
+
+/** Which slice of the phrase notebook a list should return. */
+export type PhraseStatus = 'all' | 'pending' | 'mastered' | 'untranslated';
+
+export interface PhraseQuery {
+  status?: PhraseStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface PhraseReviewChanges {
+  note?: string | null;
+  reviewed?: boolean;
+  mastered?: boolean;
+}
+
+export interface PhraseTranslationFields {
+  sourceLanguage: string;
+  translation: string;
+  explanation: string;
+}
+
+/** Shape returned when a correction is selected with its message and conversation embedded. */
+interface EmbeddedCorrectionRow extends Correction {
+  messages?: {
+    content?: unknown;
+    conversation_id?: unknown;
+    conversations?: { title?: unknown } | null;
+  } | null;
+}
 type ProgressChanges = Partial<
   Pick<UserProgress, 'total_conversations' | 'total_time_minutes' | 'common_errors'>
 >;
@@ -494,6 +572,7 @@ export class DatabaseService {
    */
   async saveCorrection(
     messageId: string,
+    userId: string,
     errorType: string,
     original: string,
     corrected: string,
@@ -501,10 +580,370 @@ export class DatabaseService {
   ): Promise<Correction> {
     const r = await this.client
       .from('corrections')
-      .insert({ message_id: messageId, error_type: errorType, original, corrected, explanation })
+      .insert({
+        message_id: messageId,
+        user_id: userId,
+        error_type: errorType,
+        original,
+        corrected,
+        explanation,
+      })
       .select()
       .single();
     return this.unwrap(r.data as Correction | null, r.error, 'Correction');
+  }
+
+  /**
+   * Stores every correction the tutor found in one message.
+   * @param messageId User message the corrections describe.
+   * @param userId Owner recorded on each row so study queries need no join.
+   * @param corrections Validated corrections; an empty list is a no-op.
+   * @returns The persisted corrections, or an empty array when nothing was supplied.
+   * @throws {DatabaseError} If insertion fails.
+   */
+  async saveOwnedCorrections(
+    messageId: string,
+    userId: string,
+    corrections: readonly NewCorrection[],
+  ): Promise<Correction[]> {
+    if (corrections.length === 0) return [];
+    const { data, error } = await this.client
+      .from('corrections')
+      .insert(
+        corrections.map((correction) => ({
+          message_id: messageId,
+          user_id: userId,
+          error_type: correction.errorType,
+          original: correction.original,
+          corrected: correction.corrected,
+          explanation: correction.explanation,
+        })),
+      )
+      .select();
+    if (error) throw new DatabaseError(`Corrections: ${error.message}`);
+    return data as Correction[];
+  }
+
+  /**
+   * Lists the corrections on a message that belong to the supplied user.
+   *
+   * Used when replaying an already-completed turn so a retry re-delivers the original corrections
+   * instead of asking the tutor to find them again.
+   * @param messageId Message whose corrections are requested.
+   * @param userId Expected owner.
+   * @returns Corrections in stable creation order.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedMessageCorrections(messageId: string, userId: string): Promise<Correction[]> {
+    const { data, error } = await this.client
+      .from('corrections')
+      .select('*')
+      .eq('message_id', messageId)
+      .eq('user_id', userId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true });
+    if (error) throw new DatabaseError(`Corrections: ${error.message}`);
+    return data as Correction[];
+  }
+
+  /**
+   * Finds one owned correction.
+   * @param id Correction identifier.
+   * @param userId Expected owner.
+   * @returns The correction, or `null` when absent or owned by another user.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedCorrection(id: string, userId: string): Promise<Correction | null> {
+    const { data, error } = await this.client
+      .from('corrections')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw new DatabaseError(`Correction: ${error.message}`);
+    return data as Correction | null;
+  }
+
+  /**
+   * Lists a user's corrections for study, newest first, with the message they came from.
+   * @param userId Owner whose corrections are requested.
+   * @param query Optional status filter, error-type filter, and pagination window.
+   * @returns Corrections enriched with message and conversation context.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedCorrections(
+    userId: string,
+    query: CorrectionQuery = {},
+  ): Promise<CorrectionReviewItem[]> {
+    const limit = Math.min(
+      Math.max(query.limit ?? DEFAULT_CORRECTION_PAGE_SIZE, 1),
+      MAX_CORRECTION_PAGE_SIZE,
+    );
+    const offset = Math.max(query.offset ?? 0, 0);
+
+    let builder = this.client
+      .from('corrections')
+      .select('*, messages!inner(content, conversation_id, conversations!inner(title))')
+      .eq('user_id', userId);
+    if (query.status === 'pending') builder = builder.eq('mastered', false);
+    if (query.status === 'mastered') builder = builder.eq('mastered', true);
+    if (query.errorType) builder = builder.eq('error_type', query.errorType);
+
+    const { data, error } = await builder
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) throw new DatabaseError(`Corrections: ${error.message}`);
+    return (data as EmbeddedCorrectionRow[]).map((row) => this.toReviewItem(row));
+  }
+
+  /**
+   * Summarizes a user's study pile.
+   * @param userId Owner whose statistics are requested.
+   * @returns Totals plus a descending count per error type.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedCorrectionStats(userId: string): Promise<CorrectionStats> {
+    const { data, error } = await this.client
+      .from('corrections')
+      .select('error_type, mastered')
+      .eq('user_id', userId)
+      .limit(CORRECTION_STATS_ROW_CAP);
+    if (error) throw new DatabaseError(`Correction stats: ${error.message}`);
+
+    const rows = data as Array<{ error_type: string; mastered: boolean }>;
+    const counts = new Map<string, number>();
+    let mastered = 0;
+    for (const row of rows) {
+      if (row.mastered) mastered += 1;
+      counts.set(row.error_type, (counts.get(row.error_type) ?? 0) + 1);
+    }
+
+    const byErrorType: CorrectionErrorTypeCount[] = Array.from(counts, ([errorType, count]) => ({
+      error_type: errorType,
+      count,
+    })).sort(
+      (left, right) => right.count - left.count || left.error_type.localeCompare(right.error_type),
+    );
+
+    return { total: rows.length, pending: rows.length - mastered, mastered, byErrorType };
+  }
+
+  /**
+   * Records study progress on an owned correction.
+   *
+   * `reviewed` increments the practice counter and stamps the time; `mastered` moves the row in or
+   * out of the pending pile. Both are independent so a learner can practise without retiring it.
+   * @param id Correction identifier.
+   * @param userId Expected owner.
+   * @param changes Review flags to apply.
+   * @returns The updated correction.
+   * @throws {NotFoundError} If the correction is absent or owned by another user.
+   * @throws {DatabaseError} If the update fails.
+   */
+  async reviewOwnedCorrection(
+    id: string,
+    userId: string,
+    changes: CorrectionReviewChanges,
+  ): Promise<Correction> {
+    const current = await this.getOwnedCorrection(id, userId);
+    if (!current) throw new NotFoundError('Correction not found');
+
+    const update: Record<string, unknown> = {};
+    if (changes.mastered !== undefined) update['mastered'] = changes.mastered;
+    if (changes.reviewed) {
+      update['review_count'] = current.review_count + 1;
+      update['last_reviewed_at'] = new Date().toISOString();
+    }
+    if (Object.keys(update).length === 0) return current;
+
+    const { data, error } = await this.client
+      .from('corrections')
+      .update(update)
+      .eq('id', id)
+      .eq('user_id', userId)
+      .select()
+      .maybeSingle();
+    if (error) throw new DatabaseError(`Correction: ${error.message}`);
+    if (!data) throw new NotFoundError('Correction not found');
+    return data as Correction;
+  }
+
+  /**
+   * Saves a phrase the learner wants to study later.
+   * @param userId Owner of the phrase.
+   * @param content Phrase text as typed.
+   * @param note Optional reminder about where it came from.
+   * @returns The newly persisted phrase, with no translation yet.
+   * @throws {DatabaseError} If insertion fails.
+   */
+  async createOwnedPhrase(userId: string, content: string, note?: string): Promise<SavedPhrase> {
+    const r = await this.client
+      .from('phrases')
+      .insert({ user_id: userId, content, note: note ?? null })
+      .select()
+      .single();
+    return this.unwrap(r.data as SavedPhrase | null, r.error, 'Phrase');
+  }
+
+  /**
+   * Lists a user's saved phrases, newest first.
+   * @param userId Owner whose phrases are requested.
+   * @param query Optional status filter and pagination window.
+   * @returns The matching phrases.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedPhrases(userId: string, query: PhraseQuery = {}): Promise<SavedPhrase[]> {
+    const limit = Math.min(
+      Math.max(query.limit ?? DEFAULT_CORRECTION_PAGE_SIZE, 1),
+      MAX_CORRECTION_PAGE_SIZE,
+    );
+    const offset = Math.max(query.offset ?? 0, 0);
+
+    let builder = this.client.from('phrases').select('*').eq('user_id', userId);
+    if (query.status === 'pending') builder = builder.eq('mastered', false);
+    if (query.status === 'mastered') builder = builder.eq('mastered', true);
+    if (query.status === 'untranslated') builder = builder.is('translation', null);
+
+    const { data, error } = await builder
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) throw new DatabaseError(`Phrases: ${error.message}`);
+    return data as SavedPhrase[];
+  }
+
+  /**
+   * Finds one owned phrase.
+   * @param id Phrase identifier.
+   * @param userId Expected owner.
+   * @returns The phrase, or `null` when absent or owned by another user.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedPhrase(id: string, userId: string): Promise<SavedPhrase | null> {
+    const { data, error } = await this.client
+      .from('phrases')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw new DatabaseError(`Phrase: ${error.message}`);
+    return data as SavedPhrase | null;
+  }
+
+  /**
+   * Caches a translation on an owned phrase.
+   * @param id Phrase identifier.
+   * @param userId Expected owner.
+   * @param translation Detected language, translation, and usage note.
+   * @returns The updated phrase.
+   * @throws {NotFoundError} If the phrase is absent or owned by another user.
+   * @throws {DatabaseError} If the update fails.
+   */
+  async saveOwnedPhraseTranslation(
+    id: string,
+    userId: string,
+    translation: PhraseTranslationFields,
+  ): Promise<SavedPhrase> {
+    return this.updateOwnedPhrase(id, userId, {
+      source_language: translation.sourceLanguage,
+      translation: translation.translation,
+      explanation: translation.explanation,
+      translated_at: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Records study progress and note edits on an owned phrase.
+   * @param id Phrase identifier.
+   * @param userId Expected owner.
+   * @param changes Review flags and optional note replacement.
+   * @returns The updated phrase.
+   * @throws {NotFoundError} If the phrase is absent or owned by another user.
+   * @throws {DatabaseError} If the update fails.
+   */
+  async reviewOwnedPhrase(
+    id: string,
+    userId: string,
+    changes: PhraseReviewChanges,
+  ): Promise<SavedPhrase> {
+    const current = await this.getOwnedPhrase(id, userId);
+    if (!current) throw new NotFoundError('Phrase not found');
+
+    const update: Record<string, unknown> = {};
+    if (changes.note !== undefined) update['note'] = changes.note;
+    if (changes.mastered !== undefined) update['mastered'] = changes.mastered;
+    if (changes.reviewed) {
+      update['review_count'] = current.review_count + 1;
+      update['last_reviewed_at'] = new Date().toISOString();
+    }
+    if (Object.keys(update).length === 0) return current;
+    return this.updateOwnedPhrase(id, userId, update);
+  }
+
+  /** Deletes a phrase only when it belongs to the supplied user. */
+  async deleteOwnedPhrase(id: string, userId: string): Promise<void> {
+    const { error, count } = await this.client
+      .from('phrases')
+      .delete({ count: 'exact' })
+      .eq('id', id)
+      .eq('user_id', userId);
+    if (error) throw new DatabaseError(`Phrase: ${error.message}`);
+    if (count === 0) throw new NotFoundError('Phrase not found');
+  }
+
+  /**
+   * Summarizes a user's phrase notebook.
+   * @param userId Owner whose statistics are requested.
+   * @returns Totals for pending, mastered, and not-yet-translated phrases.
+   * @throws {DatabaseError} If the query fails.
+   */
+  async getOwnedPhraseStats(userId: string): Promise<PhraseStats> {
+    const { data, error } = await this.client
+      .from('phrases')
+      .select('mastered, translation')
+      .eq('user_id', userId)
+      .limit(CORRECTION_STATS_ROW_CAP);
+    if (error) throw new DatabaseError(`Phrase stats: ${error.message}`);
+
+    const rows = data as Array<{ mastered: boolean; translation: string | null }>;
+    let mastered = 0;
+    let untranslated = 0;
+    for (const row of rows) {
+      if (row.mastered) mastered += 1;
+      if (!row.translation) untranslated += 1;
+    }
+    return { total: rows.length, pending: rows.length - mastered, mastered, untranslated };
+  }
+
+  private async updateOwnedPhrase(
+    id: string,
+    userId: string,
+    update: Record<string, unknown>,
+  ): Promise<SavedPhrase> {
+    const { data, error } = await this.client
+      .from('phrases')
+      .update(update)
+      .eq('id', id)
+      .eq('user_id', userId)
+      .select()
+      .maybeSingle();
+    if (error) throw new DatabaseError(`Phrase: ${error.message}`);
+    if (!data) throw new NotFoundError('Phrase not found');
+    return data as SavedPhrase;
+  }
+
+  /** Flattens an embedded correction row into the shape the study list consumes. */
+  private toReviewItem(row: EmbeddedCorrectionRow): CorrectionReviewItem {
+    const { messages, ...correction } = row;
+    const title = messages?.conversations?.title;
+    return {
+      ...correction,
+      message_content: typeof messages?.content === 'string' ? messages.content : '',
+      conversation_id:
+        typeof messages?.conversation_id === 'string' ? messages.conversation_id : '',
+      conversation_title: typeof title === 'string' ? title : '',
+    };
   }
 
   /**
@@ -650,6 +1089,546 @@ export class DatabaseService {
    */
   async deleteUserProgress(id: string): Promise<void> {
     await this.deleteById('user_progress', id, 'User progress');
+  }
+
+  /**
+   * Retrieves preferences for a user, or creates default preferences if none exist.
+   */
+  async getUserPreferences(userId: string): Promise<UserPreferences> {
+    const { data, error } = await this.client
+      .from('user_preferences')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) throw new DatabaseError(`user_preferences: ${error.message}`);
+    if (data) return data as UserPreferences;
+
+    const defaultPrefs = {
+      user_id: userId,
+      interests: ['everyday-life', 'culture', 'travel', 'movies'],
+      goals: ['casual-fluency', 'natural-speaking'],
+      tone: 'friendly' as const,
+      custom_topics: '',
+    };
+
+    const insertResult = await this.client
+      .from('user_preferences')
+      .insert(defaultPrefs)
+      .select()
+      .single();
+
+    return this.unwrap(
+      insertResult.data as UserPreferences | null,
+      insertResult.error,
+      'UserPreferences',
+    );
+  }
+
+  /**
+   * Updates or inserts preferences for a user.
+   */
+  async upsertUserPreferences(
+    userId: string,
+    changes: Partial<Pick<UserPreferences, 'interests' | 'goals' | 'tone' | 'custom_topics'>>,
+  ): Promise<UserPreferences> {
+    const payload = {
+      user_id: userId,
+      ...changes,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await this.client
+      .from('user_preferences')
+      .upsert(payload, { onConflict: 'user_id' })
+      .select()
+      .single();
+
+    return this.unwrap(data as UserPreferences | null, error, 'UserPreferences');
+  }
+
+  /**
+   * Saves or updates feedback for a conversation.
+   */
+  async saveConversationFeedback(
+    userId: string,
+    conversationId: string,
+    feedback: { satisfaction_score: number; tags?: string[]; notes?: string | null },
+  ): Promise<ConversationFeedback> {
+    await this.requireOwnedConversation(conversationId, userId);
+
+    const payload = {
+      conversation_id: conversationId,
+      user_id: userId,
+      satisfaction_score: Math.max(1, Math.min(5, Math.round(feedback.satisfaction_score))),
+      tags: feedback.tags ?? [],
+      notes: feedback.notes?.trim() || null,
+      created_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await this.client
+      .from('conversation_feedback')
+      .upsert(payload, { onConflict: 'conversation_id' })
+      .select()
+      .single();
+
+    return this.unwrap(data as ConversationFeedback | null, error, 'ConversationFeedback');
+  }
+
+  /**
+   * Gets feedback for a specific conversation.
+   */
+  async getConversationFeedback(
+    userId: string,
+    conversationId: string,
+  ): Promise<ConversationFeedback | null> {
+    await this.requireOwnedConversation(conversationId, userId);
+    const { data, error } = await this.client
+      .from('conversation_feedback')
+      .select('*')
+      .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) throw new DatabaseError(`conversation_feedback: ${error.message}`);
+    return data as ConversationFeedback | null;
+  }
+
+  /**
+   * Computes satisfaction statistics from conversation feedbacks.
+   */
+  async getFeedbackStats(userId: string): Promise<PartnerSatisfactionStats> {
+    const { data, error } = await this.client
+      .from('conversation_feedback')
+      .select('satisfaction_score, tags')
+      .eq('user_id', userId);
+
+    if (error) throw new DatabaseError(`conversation_feedback: ${error.message}`);
+    const rows = (data ?? []) as Array<{ satisfaction_score: number; tags: string[] }>;
+
+    if (rows.length === 0) {
+      return { totalRated: 0, averageScore: 0, topTags: [] };
+    }
+
+    const totalRated = rows.length;
+    const sumScore = rows.reduce((acc, row) => acc + (row.satisfaction_score || 0), 0);
+    const averageScore = Math.round((sumScore / totalRated) * 10) / 10;
+
+    const tagCounts = new Map<string, number>();
+    for (const row of rows) {
+      if (Array.isArray(row.tags)) {
+        for (const tag of row.tags) {
+          tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+        }
+      }
+    }
+
+    const topTags = Array.from(tagCounts.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    return { totalRated, averageScore, topTags };
+  }
+
+  /**
+   * Returns recent conversation feedbacks for a user.
+   */
+  async getRecentFeedbacks(
+    userId: string,
+    limit = 10,
+  ): Promise<(ConversationFeedback & { conversation_title?: string })[]> {
+    const { data, error } = await this.client
+      .from('conversation_feedback')
+      .select('*, conversations:conversation_id (title)')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) throw new DatabaseError(`conversation_feedback: ${error.message}`);
+    const rows = (data ?? []) as Array<
+      ConversationFeedback & { conversations?: { title?: string } | null }
+    >;
+    return rows.map((row) => ({
+      id: row.id,
+      conversation_id: row.conversation_id,
+      user_id: row.user_id,
+      satisfaction_score: row.satisfaction_score,
+      tags: row.tags ?? [],
+      notes: row.notes,
+      created_at: row.created_at,
+      conversation_title: row.conversations?.title ?? 'Conversation',
+    }));
+  }
+
+  /**
+   * Retrieves current partner recommendations for a user.
+   */
+  async getPartnerRecommendations(userId: string): Promise<PartnerRecommendation[]> {
+    const { data, error } = await this.client
+      .from('partner_recommendations')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (error) throw new DatabaseError(`partner_recommendations: ${error.message}`);
+    return (data ?? []) as PartnerRecommendation[];
+  }
+
+  /**
+   * Replaces or saves recommendations for a user.
+   */
+  async savePartnerRecommendations(
+    userId: string,
+    recommendations: Array<
+      Omit<PartnerRecommendation, 'id' | 'user_id' | 'created_at' | 'is_favorite'>
+    >,
+  ): Promise<PartnerRecommendation[]> {
+    await this.client
+      .from('partner_recommendations')
+      .delete()
+      .eq('user_id', userId)
+      .eq('is_favorite', false);
+
+    const rows = recommendations.map((rec) => ({
+      user_id: userId,
+      category: rec.category,
+      title: rec.title,
+      description: rec.description,
+      starter_prompt: rec.starter_prompt,
+      difficulty: rec.difficulty,
+      context_reason: rec.context_reason || null,
+      is_favorite: false,
+    }));
+
+    const { error } = await this.client.from('partner_recommendations').insert(rows);
+    if (error) throw new DatabaseError(`partner_recommendations: ${error.message}`);
+    return this.getPartnerRecommendations(userId);
+  }
+
+  /**
+   * Retrieves recent conversation memories, including user dialogue, corrections, and satisfaction feedback,
+   * for the partner recommendation engine to analyze.
+   */
+  async getRecentChatMemoriesForPartner(userId: string, limit = 5): Promise<ChatMemorySnippet[]> {
+    const { data: conversations, error: convErr } = await this.client
+      .from('conversations')
+      .select('id, title, started_at')
+      .eq('user_id', userId)
+      .order('started_at', { ascending: false })
+      .limit(limit);
+
+    if (convErr) throw new DatabaseError(`conversations: ${convErr.message}`);
+    if (!conversations || conversations.length === 0) return [];
+
+    const conversationIds = conversations.map((c) => c.id);
+
+    // Fetch messages and feedback for these conversations in parallel
+    const [messagesRes, feedbackRes] = await Promise.all([
+      this.client
+        .from('messages')
+        .select('id, conversation_id, role, content, has_corrections, timestamp')
+        .in('conversation_id', conversationIds)
+        .order('timestamp', { ascending: true }),
+      this.client
+        .from('conversation_feedback')
+        .select('conversation_id, satisfaction_score, notes')
+        .in('conversation_id', conversationIds),
+    ]);
+
+    const messages = messagesRes.data ?? [];
+    const messageIdsWithCorrections = messages.filter((m) => m.has_corrections).map((m) => m.id);
+
+    let corrections: Array<{ message_id: string; error_type: string }> = [];
+    if (messageIdsWithCorrections.length > 0) {
+      const corrRes = await this.client
+        .from('corrections')
+        .select('message_id, error_type')
+        .in('message_id', messageIdsWithCorrections);
+      corrections = corrRes.data ?? [];
+    }
+
+    const feedbackMap = new Map<string, { satisfaction_score: number; notes: string | null }>();
+    for (const f of feedbackRes.data ?? []) {
+      feedbackMap.set(f.conversation_id, {
+        satisfaction_score: f.satisfaction_score,
+        notes: f.notes,
+      });
+    }
+
+    const memorySnippets: ChatMemorySnippet[] = [];
+
+    for (const conv of conversations) {
+      const convMessages = messages.filter((m) => m.conversation_id === conv.id);
+      const userMessages = convMessages.filter((m) => m.role === 'user');
+      const assistantMessages = convMessages.filter((m) => m.role === 'assistant');
+
+      // Extract meaningful user statements (trimmed)
+      const userSnippets = userMessages
+        .map((m) => m.content.trim())
+        .filter((c) => c.length > 0)
+        .slice(-6);
+
+      // Extract brief assistant context
+      const assistantSnippets = assistantMessages
+        .map((m) => m.content.trim().slice(0, 120))
+        .filter((c) => c.length > 0)
+        .slice(-3);
+
+      const convMsgIds = new Set(convMessages.map((m) => m.id));
+      const convErrors = Array.from(
+        new Set(corrections.filter((c) => convMsgIds.has(c.message_id)).map((c) => c.error_type)),
+      );
+
+      const fb = feedbackMap.get(conv.id);
+
+      memorySnippets.push({
+        conversationId: conv.id,
+        title: conv.title,
+        startedAt: conv.started_at,
+        userMessagesCount: userMessages.length,
+        userSnippets,
+        assistantSnippets,
+        errorTypes: convErrors,
+        satisfactionScore: fb?.satisfaction_score ?? null,
+        feedbackNotes: fb?.notes ?? null,
+      });
+    }
+
+    return memorySnippets;
+  }
+
+  /**
+   * Toggles the favorite status of a recommendation.
+   */
+  async toggleFavoriteRecommendation(
+    userId: string,
+    recommendationId: string,
+  ): Promise<PartnerRecommendation> {
+    const { data: existing, error: fetchErr } = await this.client
+      .from('partner_recommendations')
+      .select('*')
+      .eq('id', recommendationId)
+      .eq('user_id', userId)
+      .single();
+
+    if (fetchErr || !existing) throw new NotFoundError('Recommendation not found');
+
+    const nextState = !existing.is_favorite;
+    const { data, error } = await this.client
+      .from('partner_recommendations')
+      .update({ is_favorite: nextState })
+      .eq('id', recommendationId)
+      .eq('user_id', userId)
+      .select()
+      .single();
+
+    return this.unwrap(data as PartnerRecommendation | null, error, 'PartnerRecommendation');
+  }
+
+  /**
+   * Gathers full summary for the Partner Hub.
+   */
+  async getPartnerHubSummary(userId: string): Promise<PartnerHubSummary> {
+    const [preferences, recommendations, stats, recentFeedbacks] = await Promise.all([
+      this.getUserPreferences(userId),
+      this.getPartnerRecommendations(userId),
+      this.getFeedbackStats(userId),
+      this.getRecentFeedbacks(userId, 5),
+    ]);
+
+    return {
+      preferences,
+      recommendations,
+      stats,
+      recentFeedbacks,
+    };
+  }
+
+  /**
+   * Retrieves the currently active story adventure for a user with characters and turns.
+   */
+  async getActiveAdventure(userId: string): Promise<StoryAdventure | null> {
+    const { data: adventure, error: advErr } = await this.client
+      .from('adventures')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (advErr) throw new DatabaseError(`adventures: ${advErr.message}`);
+    if (!adventure) return null;
+
+    const [charsRes, turnsRes] = await Promise.all([
+      this.client
+        .from('adventure_characters')
+        .select('*')
+        .eq('adventure_id', adventure.id)
+        .order('created_at', { ascending: true }),
+      this.client
+        .from('adventure_turns')
+        .select('*')
+        .eq('adventure_id', adventure.id)
+        .order('timestamp', { ascending: true }),
+    ]);
+
+    if (charsRes.error) throw new DatabaseError(`adventure_characters: ${charsRes.error.message}`);
+    if (turnsRes.error) throw new DatabaseError(`adventure_turns: ${turnsRes.error.message}`);
+
+    return {
+      ...adventure,
+      characters: (charsRes.data ?? []) as AdventureCharacter[],
+      turns: (turnsRes.data ?? []) as AdventureTurn[],
+    };
+  }
+
+  /**
+   * Archives any existing active adventures for a user.
+   */
+  async archiveActiveAdventures(userId: string): Promise<void> {
+    const { error } = await this.client
+      .from('adventures')
+      .update({ status: 'archived', updated_at: new Date().toISOString() })
+      .eq('user_id', userId)
+      .eq('status', 'active');
+    if (error) throw new DatabaseError(`adventures archive: ${error.message}`);
+  }
+
+  /**
+   * Creates a fresh story adventure with initial party characters and opening narrative turns.
+   */
+  async createAdventure(
+    userId: string,
+    params: {
+      title: string;
+      theme: string;
+      setting: string;
+      summary: string;
+      characters: Array<Omit<AdventureCharacter, 'id' | 'adventure_id' | 'created_at'>>;
+      initialTurns: Array<Omit<AdventureTurn, 'id' | 'adventure_id' | 'timestamp'>>;
+    },
+  ): Promise<StoryAdventure> {
+    await this.archiveActiveAdventures(userId);
+
+    const { data: adv, error: advErr } = await this.client
+      .from('adventures')
+      .insert({
+        user_id: userId,
+        title: params.title,
+        theme: params.theme,
+        setting: params.setting,
+        summary: params.summary,
+        status: 'active',
+      })
+      .select()
+      .single();
+
+    if (advErr || !adv) throw new DatabaseError(`adventures insert: ${advErr?.message}`);
+
+    const characterRows = params.characters.map((c) => ({
+      adventure_id: adv.id,
+      name: c.name,
+      role: c.role,
+      personality: c.personality,
+      avatar_emoji: c.avatar_emoji,
+      voice_pitch: c.voice_pitch,
+    }));
+
+    const { data: chars, error: charsErr } = await this.client
+      .from('adventure_characters')
+      .insert(characterRows)
+      .select();
+
+    if (charsErr) throw new DatabaseError(`adventure_characters insert: ${charsErr.message}`);
+
+    const turnRows = params.initialTurns.map((t) => ({
+      adventure_id: adv.id,
+      speaker_role: t.speaker_role,
+      speaker_name: t.speaker_name,
+      content: t.content,
+      corrections: t.corrections ?? [],
+      action_chips: t.action_chips ?? [],
+    }));
+
+    const { data: turns, error: turnsErr } = await this.client
+      .from('adventure_turns')
+      .insert(turnRows)
+      .select();
+
+    if (turnsErr) throw new DatabaseError(`adventure_turns insert: ${turnsErr.message}`);
+
+    return {
+      ...adv,
+      characters: chars as AdventureCharacter[],
+      turns: turns as AdventureTurn[],
+    };
+  }
+
+  /**
+   * Appends user turn and character replies to an active adventure.
+   */
+  async addAdventureUserTurnAndReplies(
+    adventureId: string,
+    userId: string,
+    params: {
+      userTurn: Omit<AdventureTurn, 'id' | 'adventure_id' | 'timestamp'>;
+      characterReplies: Array<Omit<AdventureTurn, 'id' | 'adventure_id' | 'timestamp'>>;
+      newSummary?: string;
+    },
+  ): Promise<AdventureTurnResponse> {
+    const { data: adv, error: advErr } = await this.client
+      .from('adventures')
+      .select('*')
+      .eq('id', adventureId)
+      .eq('user_id', userId)
+      .single();
+
+    if (advErr || !adv) throw new NotFoundError('Adventure not found');
+
+    const allTurnRows = [
+      {
+        adventure_id: adventureId,
+        speaker_role: params.userTurn.speaker_role,
+        speaker_name: params.userTurn.speaker_name,
+        content: params.userTurn.content,
+        corrections: params.userTurn.corrections ?? [],
+        action_chips: params.userTurn.action_chips ?? [],
+      },
+      ...params.characterReplies.map((r) => ({
+        adventure_id: adventureId,
+        speaker_role: r.speaker_role,
+        speaker_name: r.speaker_name,
+        content: r.content,
+        corrections: r.corrections ?? [],
+        action_chips: r.action_chips ?? [],
+      })),
+    ];
+
+    const { data: savedTurns, error: turnsErr } = await this.client
+      .from('adventure_turns')
+      .insert(allTurnRows)
+      .select();
+
+    if (turnsErr || !savedTurns) throw new DatabaseError(`adventure_turns: ${turnsErr?.message}`);
+
+    if (params.newSummary) {
+      await this.client
+        .from('adventures')
+        .update({ summary: params.newSummary, updated_at: new Date().toISOString() })
+        .eq('id', adventureId);
+    }
+
+    const fullAdventure = await this.getActiveAdventure(userId);
+    if (!fullAdventure) throw new DatabaseError('Failed to reload updated adventure');
+
+    return {
+      userTurn: savedTurns[0] as AdventureTurn,
+      characterReplies: savedTurns.slice(1) as AdventureTurn[],
+      adventure: fullAdventure,
+    };
   }
 
   private async requireOwnedConversation(id: string, userId: string): Promise<Conversation> {

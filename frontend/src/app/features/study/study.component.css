@@ -1,0 +1,274 @@
+.study {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  margin: 0 auto;
+  max-width: 60rem;
+  padding: 1.5rem 1rem 3rem;
+}
+
+.study-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.study-heading h1 {
+  margin: 0.15rem 0;
+}
+
+.eyebrow {
+  color: #2563eb;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.muted {
+  color: #64748b;
+  margin: 0;
+}
+
+.stats {
+  display: flex;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.stats div {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  min-width: 6rem;
+  padding: 0.6rem 0.9rem;
+  text-align: center;
+}
+
+.stats dt {
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
+.stats dd {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin: 0.15rem 0 0;
+}
+
+.controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+}
+
+.filter-group {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.filter-group button {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.35rem 0.85rem;
+}
+
+.filter-group button.active {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+
+.error-type-filter {
+  align-items: center;
+  color: #64748b;
+  display: inline-flex;
+  font-size: 0.85rem;
+  gap: 0.4rem;
+}
+
+.error-type-filter select {
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+}
+
+.study-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 0.5rem;
+  color: #b91c1c;
+  margin: 0;
+  padding: 0.6rem 0.85rem;
+}
+
+.empty-state {
+  align-items: center;
+  border: 1px dashed #cbd5e1;
+  border-radius: 0.75rem;
+  color: #64748b;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 2.5rem 1rem;
+  text-align: center;
+}
+
+.correction-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.correction-card,
+.flashcard,
+.practice-done {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1rem 1.1rem;
+}
+
+.correction-card.mastered {
+  background: #f8fafc;
+}
+
+.correction-meta {
+  align-items: center;
+  color: #64748b;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  gap: 0.5rem;
+}
+
+.chip {
+  background: #eff6ff;
+  border-radius: 999px;
+  color: #1d4ed8;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.6rem;
+}
+
+.chip.subtle {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.label {
+  color: #94a3b8;
+  display: inline-block;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  margin-right: 0.5rem;
+  min-width: 4rem;
+  text-transform: uppercase;
+}
+
+.wrong,
+.right,
+.explanation,
+.source {
+  margin: 0;
+}
+
+.wrong del {
+  color: #b91c1c;
+  text-decoration-thickness: 1px;
+}
+
+.right strong {
+  color: #047857;
+}
+
+.explanation {
+  color: #334155;
+}
+
+.source {
+  border-top: 1px solid #f1f5f9;
+  font-size: 0.8rem;
+  margin-top: 0.35rem;
+  padding-top: 0.4rem;
+}
+
+.correction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.correction-actions button {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+}
+
+.correction-actions button.primary-action {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+
+.correction-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.practice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.flashcard {
+  gap: 0.6rem;
+  min-height: 14rem;
+}
+
+.flashcard .chip {
+  align-self: flex-start;
+}
+
+.progress {
+  font-size: 0.8rem;
+}
+
+.prompt {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin: 0.35rem 0;
+}
+
+.answer {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.75rem 0.9rem;
+}
+
+.practice-done {
+  align-items: flex-start;
+  gap: 0.5rem;
+}

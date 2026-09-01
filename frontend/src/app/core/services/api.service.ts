@@ -1,4 +1,4 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import type { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
@@ -29,6 +29,25 @@ export class ApiService {
    */
   post<T, B = unknown>(path: string, body: B): Observable<T> {
     return this.http.post<T>(this.url(path), body);
+  }
+
+  /** Sends an HTTP POST request and returns a binary response body. */
+  postBlob<B = unknown>(path: string, body: B): Observable<Blob> {
+    return this.http.post(this.url(path), body, { responseType: 'blob' });
+  }
+
+  /**
+   * Uploads a binary payload under an explicit content type.
+   * @param path Path relative to the configured API base URL.
+   * @param body Binary payload sent as the raw request body.
+   * @param contentType Media type describing the payload, forwarded verbatim.
+   * @returns An observable that emits the deserialized JSON response body.
+   * @throws Emits the `HttpClient` request error through the returned observable.
+   */
+  postBinary<T>(path: string, body: Blob, contentType: string): Observable<T> {
+    return this.http.post<T>(this.url(path), body, {
+      headers: new HttpHeaders({ 'Content-Type': contentType }),
+    });
   }
 
   /** Sends an HTTP PATCH request to an API path. */

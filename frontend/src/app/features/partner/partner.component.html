@@ -1,0 +1,221 @@
+<section class="partner-shell">
+  <!-- Top Greeting & Header -->
+  <header class="partner-hero" *ngIf="currentUser$ | async as user">
+    <div class="hero-content">
+      <div class="partner-badge">
+        <span class="pulse-dot"></span>
+        <span>Your English Partner</span>
+      </div>
+      <h1>{{ greetingMessage(user.name) }}</h1>
+      <p class="hero-sub">
+        I adapt to your personal tastes, tone, and goals. Pick a recommended topic below or
+        customize what you'd like to explore next.
+      </p>
+    </div>
+
+    <div class="satisfaction-summary-card" *ngIf="summary?.stats as stats">
+      <div class="stat-score-block">
+        <span class="score-number">{{ stats.averageScore ? stats.averageScore : '—' }}</span>
+        <div class="score-stars">
+          <span class="stars-visual">{{ starRatingString(stats.averageScore || 5) }}</span>
+          <span class="rated-count"
+            >{{ stats.totalRated }}
+            {{ stats.totalRated === 1 ? 'chat rated' : 'chats rated' }}</span
+          >
+        </div>
+      </div>
+      <p class="stat-caption">Partner Affinity & Feedback</p>
+      <div class="top-tags" *ngIf="stats.topTags.length">
+        <span class="tag-pill" *ngFor="let t of stats.topTags">✨ {{ t.tag }} ({{ t.count }})</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Alerts -->
+  <div *ngIf="errorMessage" class="alert error-alert" role="alert">
+    {{ errorMessage }}
+  </div>
+  <div *ngIf="successMessage" class="alert success-alert" role="status">
+    {{ successMessage }}
+  </div>
+
+  <div *ngIf="loading" class="loading-state">
+    <div class="spinner"></div>
+    <p>Connecting with your Partner and loading personalized topics…</p>
+  </div>
+
+  <main class="partner-grid" *ngIf="!loading && summary">
+    <!-- Left Column: Recommended for you -->
+    <section class="recommendations-section">
+      <div class="section-header">
+        <div>
+          <h2>Recommended For You</h2>
+          <p class="muted">
+            Personalized conversation ideas based primarily on your past chats, vocabulary, and
+            tastes.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="secondary-btn refresh-btn"
+          [disabled]="refreshing"
+          (click)="refreshRecommendations()"
+          title="Ask Gemini to generate new ideas"
+        >
+          <span [class.spin]="refreshing">🔄</span>
+          {{ refreshing ? 'Generating…' : 'Refresh picks' }}
+        </button>
+      </div>
+
+      <div class="recommendations-list">
+        <article
+          class="rec-card"
+          *ngFor="let rec of summary.recommendations"
+          [ngClass]="categoryClass(rec.category)"
+        >
+          <div class="rec-card-top">
+            <span class="category-badge">{{ categoryLabel(rec.category) }}</span>
+            <div class="rec-card-meta">
+              <span class="diff-badge" [ngClass]="'diff-' + rec.difficulty">{{
+                rec.difficulty
+              }}</span>
+              <button
+                type="button"
+                class="star-toggle"
+                [class.favorited]="rec.is_favorite"
+                [disabled]="actionRecommendationId === rec.id"
+                (click)="toggleFavorite(rec)"
+                title="Save as favorite"
+              >
+                {{ rec.is_favorite ? '★' : '☆' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="rec-context-tag" *ngIf="rec.context_reason">
+            <span class="context-icon">💬</span>
+            <span class="context-text">{{ rec.context_reason }}</span>
+          </div>
+
+          <h3 class="rec-title">{{ rec.title }}</h3>
+          <p class="rec-desc">{{ rec.description }}</p>
+
+          <div class="starter-preview">
+            <span class="starter-label">Opening line:</span>
+            <blockquote class="starter-quote">"{{ rec.starter_prompt }}"</blockquote>
+          </div>
+
+          <div class="rec-card-actions">
+            <button type="button" class="primary-action-btn" (click)="startChat(rec)">
+              <span>💬</span>
+              <span>Start chatting about this</span>
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Right Column: Preferences, Tone & Recent Feedback -->
+    <aside class="sidebar-section">
+      <!-- Preferences Editor Card -->
+      <section class="partner-card preferences-card">
+        <h3>🎯 Your Tastes & Interests</h3>
+        <p class="card-hint">
+          Select what you enjoy talking about so your Partner can tailor conversations to you.
+        </p>
+
+        <div class="chips-container">
+          <button
+            type="button"
+            class="chip"
+            *ngFor="let opt of availableInterests"
+            [class.active]="isInterestSelected(opt.id)"
+            (click)="toggleInterest(opt.id)"
+          >
+            <span>{{ opt.emoji }}</span>
+            <span>{{ opt.label }}</span>
+          </button>
+        </div>
+
+        <div class="custom-interest-row">
+          <input
+            type="text"
+            [formControl]="customInterestInput"
+            placeholder="Add custom interest (e.g. Vintage Cars, Jazz)…"
+            (keyup.enter)="addCustomInterest()"
+          />
+          <button type="button" class="btn-sm" (click)="addCustomInterest()">Add</button>
+        </div>
+
+        <div class="selected-custom-tags" *ngIf="selectedInterests.length">
+          <span class="custom-tag" *ngFor="let item of selectedInterests">
+            {{ item }}
+            <button type="button" (click)="removeInterest(item)" aria-label="Remove interest">
+              &times;
+            </button>
+          </span>
+        </div>
+
+        <hr class="divider" />
+
+        <h3>🎭 Companion Conversational Style</h3>
+        <p class="card-hint">Choose how your Partner should interact with you.</p>
+
+        <div class="tone-list">
+          <label
+            class="tone-card"
+            *ngFor="let tone of toneOptions"
+            [class.selected]="selectedTone === tone.id"
+            (click)="selectTone(tone.id)"
+          >
+            <div class="tone-head">
+              <span class="tone-emoji">{{ tone.emoji }}</span>
+              <strong>{{ tone.label }}</strong>
+            </div>
+            <span class="tone-desc">{{ tone.description }}</span>
+          </label>
+        </div>
+
+        <div class="custom-topic-field">
+          <label for="customTopics">
+            <strong>Notes / Custom topics:</strong>
+            <textarea
+              id="customTopics"
+              [formControl]="customTopicControl"
+              rows="2"
+              placeholder="Tell your partner about yourself (e.g. 'I work as a designer and love outdoor sports')…"
+            ></textarea>
+          </label>
+        </div>
+
+        <button
+          type="button"
+          class="save-btn"
+          [disabled]="savingPreferences || refreshing"
+          (click)="savePreferences()"
+        >
+          {{ savingPreferences ? 'Saving…' : 'Save & Update Partner' }}
+        </button>
+      </section>
+
+      <!-- Recent Feedback & Satisfaction Tracker -->
+      <section class="partner-card feedback-history-card" *ngIf="summary.recentFeedbacks.length">
+        <h3>⭐ Recent Conversation Ratings</h3>
+        <p class="card-hint">Your feedback directly tunes the partner's recommendations.</p>
+
+        <div class="feedback-list">
+          <div class="feedback-item" *ngFor="let fb of summary.recentFeedbacks">
+            <div class="feedback-top">
+              <strong class="conv-name">{{ fb.conversation_title || 'Conversation' }}</strong>
+              <span class="stars-badge">{{ starRatingString(fb.satisfaction_score) }}</span>
+            </div>
+            <div class="feedback-tags" *ngIf="fb.tags.length">
+              <span class="fb-tag" *ngFor="let tag of fb.tags">{{ tag }}</span>
+            </div>
+            <p class="feedback-notes" *ngIf="fb.notes">"{{ fb.notes }}"</p>
+          </div>
+        </div>
+      </section>
+    </aside>
+  </main>
+</section>

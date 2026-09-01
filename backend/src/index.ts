@@ -4,6 +4,11 @@ import cors from 'cors';
 import express from 'express';
 import { authRouter } from './routes/auth.routes.js';
 import { conversationsRouter } from './routes/conversations.routes.js';
+import { correctionsRouter } from './routes/corrections.routes.js';
+import { phrasesRouter } from './routes/phrases.routes.js';
+import { partnerRouter } from './routes/partner.routes.js';
+import { speechRouter } from './routes/speech.routes.js';
+import { adventureRouter } from './routes/adventure.routes.js';
 import { errorMiddleware } from './middleware/error.middleware.js';
 import { socketService } from './services/socket.service.js';
 
@@ -15,6 +20,11 @@ app.use(express.json({ limit: '1mb' }));
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/api/auth', authRouter);
 app.use('/api/conversations', conversationsRouter);
+app.use('/api/corrections', correctionsRouter);
+app.use('/api/phrases', phrasesRouter);
+app.use('/api/partner', partnerRouter);
+app.use('/api/speech', speechRouter);
+app.use('/api/adventures', adventureRouter);
 app.use(errorMiddleware);
 
 const server = http.createServer(app);
